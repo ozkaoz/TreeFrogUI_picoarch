@@ -9,6 +9,15 @@
 #include "scaler_neon.h"
 #include "plat.h"
 
+/* scale.c uses SCREEN_BPP as bytes/pixel; plat.h defines it as bits.
+   Override here so all scaler formulas produce correct byte offsets. */
+#ifdef PLATFORM_SF3000
+#undef SCREEN_BPP
+#define SCREEN_BPP 2
+#undef SCREEN_PITCH
+#define SCREEN_PITCH (SCREEN_BPP * SCREEN_WIDTH)
+#endif
+
 typedef void (*scaler_t)(unsigned w, unsigned h, size_t pitch, const void *src, void *dst);
 
 struct dimensions {
@@ -191,9 +200,6 @@ static void scale2x_scanline(unsigned w, unsigned h, size_t pitch, const void *s
 }
 
 static void scale3x(unsigned w, unsigned h, size_t pitch, const void *src, void *dst) {
-	scale3x_c16(src, dst+dst_offs, w, h, pitch, SCREEN_PITCH);
-	return;
-
 	dst += dst_offs;
 	for (unsigned y = 0; y < h; y++) {
 		uint16_t* src_row = src + y * pitch;

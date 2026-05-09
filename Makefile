@@ -75,10 +75,10 @@ else ifeq ($(platform), sf3000)
 	OBJS += plat_sf3000.o
 	CFLAGS += -mips32r2 -march=mips32r2 -mtune=24kc -mfp32 -mhard-float -DCONTENT_DIR='"/mnt/SDCARD/Roms"' -DUSE_C_SCALER -DPLATFORM_SF3000
 	LDFLAGS += -mips32r2 -march=mips32r2 -mtune=24kc -mfp32 -mhard-float
+	# Disable LTO — breaks MIPS ABICALLS GP setup for static function pointers passed to PIC code
+	CFLAGS  := $(filter-out -flto,$(CFLAGS))
+	LDFLAGS := $(filter-out -flto,$(LDFLAGS))
 
-	# Ensure consistent ABI settings
-	CFLAGS += -mno-abicalls -fno-pic -g -DDEBUG
-	LDFLAGS += -mno-abicalls -fno-pic
 else ifeq ($(platform), unix)
 	OBJS += plat_linux.o
 	LDFLAGS += -fPIE
@@ -133,6 +133,7 @@ clean-libpicofe:
 plat_miyoomini.o: plat_sdl.c
 plat_trimui.o: plat_sdl.c
 plat_linux.o: plat_sdl.c
+plat_sf3000.o: plat_sdl.c
 
 $(BIN): libpicofe/.patched $(OBJS)
 	$(CC) $(OBJS) $(LDFLAGS) -o $(BIN)
@@ -143,7 +144,7 @@ $1_REPO ?= https://github.com/libretro/$(1)/
 
 $1_BUILD_PATH ?= $(1)
 
-$1_MAKE = make $(and $($1_MAKEFILE),-f $($1_MAKEFILE)) platform=$(platform) $(and $(DEBUG),DEBUG=$(DEBUG)) $(and $(PROFILE),PROFILE=$(PROFILE)) $($(1)_FLAGS)
+$1_MAKE = make $(and $($1_MAKEFILE),-f $($1_MAKEFILE)) platform=$(if $(filter sf3000,$(platform)),unix,$(platform)) $(and $(DEBUG),DEBUG=$(DEBUG)) $(and $(PROFILE),PROFILE=$(PROFILE)) $($(1)_FLAGS)
 
 clone-$(1):
 	git clone $(if $($1_REVISION),,--depth 1) --recursive $$($(1)_REPO) $(1)

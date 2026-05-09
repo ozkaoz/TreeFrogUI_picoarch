@@ -16,6 +16,7 @@
 #include "plat.h"
 #include "util.h"
 
+extern int g_debug_frame;
 struct core_cbs current_core;
 char core_path[MAX_PATH];
 struct content *content;
@@ -361,12 +362,7 @@ static bool pa_environment(unsigned cmd, void *data) {
 		break;
 	}
 	case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT: { /* 10 */
-		const enum retro_pixel_format *format = (enum retro_pixel_format *)data;
-
-		if (*format != RETRO_PIXEL_FORMAT_RGB565) {
-			/* 565 is only supported format */
-			return false;
-		}
+		/* accept all formats; plat_video_process handles conversion */
 		break;
 	}
 	case RETRO_ENVIRONMENT_SET_DISK_CONTROL_INTERFACE: { /* 13 */
@@ -510,23 +506,33 @@ static void pa_video_refresh(const void *data, unsigned width, unsigned height, 
 }
 
 static void pa_audio_sample(int16_t left, int16_t right) {
+	if (g_debug_frame >= 189 && g_debug_frame <= 196)
+		fprintf(stderr, "f%d audio_sample\n", g_debug_frame);
 	const struct audio_frame frame = { .left = left, .right = right };
 	if (!should_quit && enable_audio)
 		plat_sound_write(&frame, 1);
 }
 
 static size_t pa_audio_sample_batch(const int16_t *data, size_t frames) {
+	if (g_debug_frame >= 189 && g_debug_frame <= 196)
+		fprintf(stderr, "f%d audio_batch frames=%zu\n", g_debug_frame, frames);
 	if (!should_quit && enable_audio)
 		plat_sound_write((const struct audio_frame *)data, frames);
 	return frames;
 }
 
 static void pa_input_poll(void) {
+	if (g_debug_frame >= 189 && g_debug_frame <= 196)
+		fprintf(stderr, "f%d input_poll\n", g_debug_frame);
 	int actions[IN_BINDTYPE_COUNT] = { 0, };
 	unsigned int emu_act;
 	int which = EACTION_NONE;
 
+	if (g_debug_frame >= 189 && g_debug_frame <= 196)
+		fprintf(stderr, "f%d in_update_before\n", g_debug_frame);
 	in_update(actions);
+	if (g_debug_frame >= 189 && g_debug_frame <= 196)
+		fprintf(stderr, "f%d in_update_after\n", g_debug_frame);
 	emu_act = actions[IN_BINDTYPE_EMU];
 	if (emu_act) {
 		for (; !(emu_act & 1); emu_act >>= 1, which++)
@@ -577,8 +583,12 @@ int core_open(const char *corefile, const char *tag_name) {
 
 	PA_INFO("Loading core %s\n", corefile);
 
+	/* Pre-load C++ runtime so cores that need it (e.g. Nestopia) can resolve
+	   their symbols even though libstdc++ isn't a declared NEEDED dependency */
+	dlopen("libstdc++.so.6", RTLD_NOW | RTLD_GLOBAL);
+
 	memset(&current_core, 0, sizeof(current_core));
-	current_core.handle = dlopen(corefile, RTLD_LAZY);
+	current_core.handle = dlopen(corefile, RTLD_NOW | RTLD_GLOBAL);
 
 	if (!current_core.handle) {
 		PA_ERROR("Couldn't load core: %s\n", dlerror());
@@ -614,6 +624,7 @@ int core_open(const char *corefile, const char *tag_name) {
 	set_input_poll = dlsym(current_core.handle, "retro_set_input_poll");
 	set_input_state = dlsym(current_core.handle, "retro_set_input_state");
 
+	dlerror();
 	set_environment(pa_environment);
 	set_video_refresh(pa_video_refresh);
 	set_audio_sample(pa_audio_sample);

@@ -13,6 +13,26 @@
 
 static SDL_Surface* screen;
 
+// SF3000 raw framebuffer support
+#ifdef PLATFORM_SF3000
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/ioctl.h>
+#include <linux/fb.h>
+
+static int sf3000_fb_fd = -1;
+static uint32_t *sf3000_fb_mem = NULL;
+static struct fb_var_screeninfo sf3000_vinfo;
+static struct fb_fix_screeninfo sf3000_finfo;
+static size_t sf3000_fb_size = 0;
+
+// Forward declarations
+int sf3000_fb_init(void);
+void sf3000_fb_blit(const void *src, int width, int height);
+void sf3000_fb_finish(void);
+
+#endif
+
 // begin miyoo hardware scaling support
 #ifndef PLATFORM_SF3000
 // loosely based on eggs' picogpsp gfx.c
@@ -341,10 +361,7 @@ static void buffer_scale(unsigned w, unsigned h, size_t pitch, const void *src) 
 //extern void in_sdl_event_handler(void *event_);
 
 // Redirect plat_sdl_event_handler to the external handler
-void plat_sdl_event_handler(void *event_)
-{
-    ext_event_handler(event_);
-}
+// Stub removed - using proper implementation below instead
 
 struct audio_state {
 	unsigned buf_w;
@@ -474,8 +491,13 @@ static int audio_resample_nearest(struct audio_frame data) {
 
 static void *fb_flip(void)
 {
+#ifdef PLATFORM_SF3000
+	/* Blit already done in plat_video_process directly from libretro data */
+	return screen ? screen->pixels : NULL;
+#else
 	SDL_Flip(screen);
 	return screen->pixels;
+#endif
 }
 
 void *plat_prepare_screenshot(int *w, int *h, int *bpp)
@@ -484,7 +506,11 @@ void *plat_prepare_screenshot(int *w, int *h, int *bpp)
 	if (h) *h = SCREEN_HEIGHT;
 	if (bpp) *bpp = SCREEN_BPP;
 
+#ifdef PLATFORM_SF3000
+	return screen ? screen->pixels : NULL;
+#else
 	return screen->pixels;
+#endif
 }
 
 int plat_dump_screen(const char *filename) {
@@ -604,35 +630,85 @@ void plat_video_set_msg(const char *new_msg, unsigned priority, unsigned msec)
 
 static SDL_Surface* clean_screen = NULL;
 static const void* framebuffer; // NOTE: we don't own this
+static int g_game_w = 256, g_game_h = 224; /* actual game dimensions from core */
 void* plat_clean_screen(void) {
 	return scale_clean(framebuffer, clean_screen->pixels) ? clean_screen : NULL;
 }
 
+extern int g_debug_frame;
 void plat_video_process(const void *data, unsigned width, unsigned height, size_t pitch) {
+	static int vp_count = 0;
+	if (vp_count++ < 5 || (g_debug_frame >= 189 && g_debug_frame <= 196))
+		fprintf(stderr, "vp#%d f%d data=%p w=%u h=%u pitch=%zu\n", vp_count, g_debug_frame, data, width, height, pitch);
+	if (!data) {
+		if (g_debug_frame >= 189 && g_debug_frame <= 196)
+			fprintf(stderr, "f%d video NULL skip\n", g_debug_frame);
+		return;
+	}
 	framebuffer = data;
-	
+
 	static int had_msg = 0;
 	SDL_LockSurface(screen);
-	
+
 	if (had_msg) {
-		video_clear_msg(screen->pixels, screen->h, screen->pitch / SCREEN_BPP);
+		video_clear_msg(screen->pixels, screen->h, screen->pitch / (SCREEN_BPP / 8));
 		had_msg = 0;
 	}
-	
+
+#ifdef PLATFORM_SF3000
+	if (pitch == width * 2) {
+		/* RGB565: blit directly to fb0, bypass staging buffer entirely.
+		   Staging had x0/y0 offsets and wrong stride=320 instead of gw. */
+		g_game_w = (int)width; g_game_h = (int)height;
+		SDL_UnlockSurface(screen);
+		video_update_msg();
+		sf3000_fb_blit(data, (int)width, (int)height);
+		return;
+	}
+
+	if (pitch == width * 4) {
+		/* XRGB8888 path: convert directly into screen->pixels as RGB565 */
+		static int xrgb_count = 0;
+		if (xrgb_count++ < 2 || (g_debug_frame >= 189 && g_debug_frame <= 196))
+			fprintf(stderr, "f%d xrgb: data=%p w=%u h=%u pitch=%zu\n", g_debug_frame, data, width, height, pitch);
+		int x0 = ((int)SCREEN_WIDTH  - (int)width)  / 2;
+		int y0 = ((int)SCREEN_HEIGHT - (int)height) / 2;
+		if (x0 < 0) x0 = 0;
+		if (y0 < 0) y0 = 0;
+		memset(screen->pixels, 0, SCREEN_HEIGHT * (screen->pitch));
+		const uint32_t *src32 = (const uint32_t *)data;
+		for (unsigned y = 0; y < height && (y + y0) < SCREEN_HEIGHT; y++) {
+			const uint32_t *row = src32 + y * (pitch / 4);
+			uint16_t *dst = (uint16_t *)screen->pixels
+			                + (y + y0) * (screen->pitch / 2) + x0;
+			for (unsigned x = 0; x < width && (x + x0) < SCREEN_WIDTH; x++) {
+				uint32_t p = row[x];
+				uint8_t r = (p >> 16) & 0xFF;
+				uint8_t g = (p >>  8) & 0xFF;
+				uint8_t b = (p)       & 0xFF;
+				*dst++ = (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+			}
+		}
+		SDL_UnlockSurface(screen);
+		video_update_msg();
+		return;
+	}
+#endif
+
 	if (scale_size==SCALE_SIZE_NONE) {
 		scale(width, height, pitch, data, screen->pixels);
 	}
 	else {
 		buffer_scale(width, height, pitch, data);
 	}
-	
+
 	if (msg[0]) {
-		video_print_msg(screen->pixels, screen->h, screen->pitch / SCREEN_BPP, msg);
+		video_print_msg(screen->pixels, screen->h, screen->pitch / (SCREEN_BPP / 8), msg);
 		had_msg = 1;
 	}
-	
+
 	SDL_UnlockSurface(screen);
-	
+
 	video_update_msg();
 }
 
@@ -812,68 +888,82 @@ void plat_sound_resize_buffer(void) {
 	SDL_UnlockAudio();
 }
 
-/*
 void plat_sdl_event_handler(void *event_)
 {
     SDL_Event *event = (SDL_Event *)event_;
 
     switch (event->type) {
-        case SDL_KEYDOWN:
-            // Handle key press
-            PA_INFO("Key pressed: %s (SDL keycode: %d)\n", SDL_GetKeyName(event->key.keysym.sym), event->key.keysym.sym);
-            in_sdl_key_down(event->key.keysym.sym);
-            break;
-
-        case SDL_KEYUP:
-            // Handle key release
-            PA_INFO("Key released: %s (SDL keycode: %d)\n", SDL_GetKeyName(event->key.keysym.sym), event->key.keysym.sym);
-            in_sdl_key_up(event->key.keysym.sym);
-            break;
-
         case SDL_QUIT:
-            // Handle quit event (e.g., window close)
-            PA_INFO("Quit event received\n");
             exit(0);
             break;
 
-        case SDL_MOUSEBUTTONDOWN:
-            // Handle mouse button press
-            PA_INFO("Mouse button %d pressed at (%d, %d)\n",
-                    event->button.button, event->button.x, event->button.y);
-            break;
-
-        case SDL_MOUSEBUTTONUP:
-            // Handle mouse button release
-            PA_INFO("Mouse button %d released at (%d, %d)\n",
-                    event->button.button, event->button.x, event->button.y);
-            break;
-
-        case SDL_MOUSEMOTION:
-            // Handle mouse motion
-            PA_INFO("Mouse moved to (%d, %d)\n", event->motion.x, event->motion.y);
-            break;
-
         default:
-            // Handle other events if necessary
             break;
     }
 }
-*/
 
 int plat_init(void)
 {
+#ifdef PLATFORM_SF3000
+    setenv("SDL_NOMOUSE", "1", 1);
+    setenv("SDL_VIDEODRIVER", "dummy", 1);
+    if (SDL_Init(SDL_INIT_VIDEO) < 0) {
+        PA_ERROR("SF3000 SDL_Init failed: %s\n", SDL_GetError());
+        return -1;
+    }
+
+    // Wire display controller to fb0 AFTER SDL_Init so SDL can't reset it
+    extern int sf3000_fb_init(void);
+    if (sf3000_fb_init() < 0) {
+        PA_ERROR("sf3000_fb_init failed\n");
+        return -1;
+    }
+    /* Off-screen staging buffer only — do NOT call SDL_SetVideoMode,
+       it changes fb0 resolution away from 720x1280 and breaks our mmap writes. */
+    screen = SDL_CreateRGBSurface(SDL_SWSURFACE, SCREEN_WIDTH, SCREEN_HEIGHT, 16,
+                                  0xF800, 0x07E0, 0x001F, 0x0000);
+    if (!screen) {
+        PA_ERROR("SF3000 SDL_CreateRGBSurface failed: %s\n", SDL_GetError());
+        return -1;
+    }
+
+    fprintf(stderr, "SDL surface: %dx%d bpp=%d pitch=%d\n",
+            screen->w, screen->h, screen->format->BitsPerPixel, screen->pitch);
+    PA_INFO("SF3000: fb0 + SDL dummy surface ready (%dx%d)\n", SCREEN_WIDTH, SCREEN_HEIGHT);
+    SDL_ShowCursor(0);
+
+    g_menuscreen_w  = SCREEN_WIDTH;
+    g_menuscreen_h  = SCREEN_HEIGHT;
+    g_menuscreen_pp = SCREEN_WIDTH;
+    g_menuscreen_ptr = NULL;
+    g_menubg_src_w  = SCREEN_WIDTH;
+    g_menubg_src_h  = SCREEN_HEIGHT;
+    g_menubg_src_pp = SCREEN_WIDTH;
+
+    if (in_sdl_init(&in_sdl_platform_data, plat_sdl_event_handler)) {
+        PA_ERROR("SF3000 SDL input failed to init: %s\n", SDL_GetError());
+        return -1;
+    }
+    in_probe();
+
+    if (plat_sound_init()) {
+        PA_ERROR("SF3000 SDL sound failed to init (continuing without audio): %s\n", SDL_GetError());
+    }
+
+    return 0;
+#else
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
         PA_ERROR("%s, SDL_Init failed: %s\n", __func__, SDL_GetError());
         return -1;
     }
-	screen = SDL_SetVideoMode(SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_BPP * 8, SDL_SWSURFACE);
+	screen = SDL_SetVideoMode(SCREEN_WIDTH, SCREEN_HEIGHT, 0, SDL_SWSURFACE | SDL_DOUBLEBUF);
 	PA_INFO("Using Framebuffer: %s\n", getenv("SDL_FBDEV"));
 	if (screen == NULL) {
 		PA_ERROR("%s, failed to set video mode\n", __func__, SDL_GetError());
 		return -1;
 	}
 	
-	clean_screen = SDL_CreateRGBSurface(SDL_SWSURFACE, SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_BPP * 8,
+	clean_screen = SDL_CreateRGBSurface(SDL_SWSURFACE, SCREEN_WIDTH, SCREEN_HEIGHT, 0,
                                     0x00FF0000,  // Red mask
                                     0x0000FF00,  // Green mask
                                     0x000000FF,  // Blue mask
@@ -907,6 +997,7 @@ int plat_init(void)
 	}
 	printf("Framebuffer resolution: %dx%d, color depth: %d bpp\n", SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_BPP * 8);
 	return 0;
+#endif // PLATFORM_SF3000
 }
 
 int plat_reinit(void)
@@ -919,10 +1010,174 @@ int plat_reinit(void)
 
 void plat_finish(void)
 {
+#ifdef PLATFORM_SF3000
+	extern void sf3000_fb_finish(void);
+	plat_sound_finish();
+	sf3000_fb_finish();
+	SDL_FreeSurface(screen);
+	screen = NULL;
+	SDL_Quit();
+#else
 	plat_sound_finish();
 	buffer_quit();
 	SDL_FreeSurface(clean_screen);
 	SDL_FreeSurface(screen);
 	screen = NULL;
 	SDL_Quit();
+#endif
 }
+
+// SF3000 framebuffer implementation
+#ifdef PLATFORM_SF3000
+
+int sf3000_fb_init(void) {
+    /* Wire display controller to fb0 — must happen AFTER SDL_Init so SDL
+       can't reset this connection. Extracted from fbdev_init() disassembly. */
+    int dis = open("/dev/dis", O_RDWR);
+    if (dis >= 0) {
+        struct { int a, b, c; } buf = {1, 0, 0};
+        int r = ioctl(dis, 0xc00c0e0c, &buf);
+        fprintf(stderr, "SF3000: /dev/dis ioctl ret=%d\n", r);
+        close(dis);
+    } else {
+        fprintf(stderr, "SF3000: /dev/dis open failed\n");
+    }
+
+    // Open framebuffer (720x1280, 32-bit ARGB)
+    sf3000_fb_fd = open("/dev/fb0", O_RDWR);
+    if (sf3000_fb_fd < 0) return -1;
+
+    ioctl(sf3000_fb_fd, FBIOGET_VSCREENINFO, &sf3000_vinfo);
+    ioctl(sf3000_fb_fd, FBIOGET_FSCREENINFO, &sf3000_finfo);
+
+    sf3000_fb_size = sf3000_finfo.line_length * sf3000_vinfo.yres;
+    sf3000_fb_mem = mmap(NULL, sf3000_fb_size, PROT_READ | PROT_WRITE, MAP_SHARED, sf3000_fb_fd, 0);
+    if (sf3000_fb_mem == MAP_FAILED) {
+        close(sf3000_fb_fd);
+        sf3000_fb_fd = -1;
+        return -1;
+    }
+
+    fprintf(stderr, "SF3000 fb0: %ux%u (virtual %ux%u) bpp=%u line=%u smem=%u mem=%p\n",
+            sf3000_vinfo.xres, sf3000_vinfo.yres,
+            sf3000_vinfo.xres_virtual, sf3000_vinfo.yres_virtual,
+            sf3000_vinfo.bits_per_pixel,
+            sf3000_finfo.line_length, sf3000_finfo.smem_len,
+            (void *)sf3000_fb_mem);
+    fprintf(stderr, "SF3000 fb0: xoffset=%u yoffset=%u type=%u visual=%u\n",
+            sf3000_vinfo.xoffset, sf3000_vinfo.yoffset,
+            sf3000_finfo.type, sf3000_finfo.visual);
+    fprintf(stderr, "SF3000 fb0: pixel r=%u/%u g=%u/%u b=%u/%u a=%u/%u\n",
+            sf3000_vinfo.red.offset,   sf3000_vinfo.red.length,
+            sf3000_vinfo.green.offset, sf3000_vinfo.green.length,
+            sf3000_vinfo.blue.offset,  sf3000_vinfo.blue.length,
+            sf3000_vinfo.transp.offset, sf3000_vinfo.transp.length);
+
+    /* Write test pixel, read it back to verify mmap works */
+    uint32_t old = sf3000_fb_mem[0];
+    sf3000_fb_mem[0] = 0xDEADBEEF;
+    uint32_t rb = sf3000_fb_mem[0];
+    sf3000_fb_mem[0] = old;
+    fprintf(stderr, "SF3000 fb0: write-readback test: wrote 0xDEADBEEF got 0x%08X (%s)\n",
+            rb, rb == 0xDEADBEEF ? "OK" : "FAIL - mmap not writable?");
+
+    /* Clear to opaque black once — blit overwrites entirely each frame */
+    for (size_t i = 0; i < sf3000_fb_size / 4; i++)
+        sf3000_fb_mem[i] = 0xFF000000u;
+
+    return 0;
+}
+
+void sf3000_fb_blit(const void *src, int width, int height) {
+    static int blit_count = 0; blit_count++;
+
+    /* Re-assert display controller → fb0 page 0 every frame.
+       Virtual fb is 5120 lines (4 pages); something may flip yoffset
+       after init. This ioctl keeps display pointed at our page 0. */
+    {
+        int dis = open("/dev/dis", O_RDWR);
+        if (dis >= 0) {
+            struct { int a, b, c; } buf = {1, 0, 0};
+            ioctl(dis, 0xc00c0e0c, &buf);
+            close(dis);
+        }
+    }
+
+    if (blit_count <= 3 || blit_count == 60) {
+        struct fb_var_screeninfo vi;
+        ioctl(sf3000_fb_fd, FBIOGET_VSCREENINFO, &vi);
+        fprintf(stderr, "blit#%d mem=%p src=%p w=%d h=%d gw=%d gh=%d yoff=%u\n",
+                blit_count, (void*)sf3000_fb_mem, src, width, height, g_game_w, g_game_h, vi.yoffset);
+    }
+    if (!sf3000_fb_mem) return;
+
+    int dst_stride = (int)(sf3000_finfo.line_length / 4);
+    int fb_w = (int)sf3000_vinfo.xres;   /* 720 */
+    int fb_h = (int)sf3000_vinfo.yres;   /* 1280 */
+
+    /* Stripe test: first 180 frames — stripes by fb_x (confirms visible fb_x range).
+       Expect visible: fb_x 240..719 (physical_y 0..479 via 719-fb_x formula).
+       RED/ORANGE (fb_x 0..239) should be OFF SCREEN. */
+    if (blit_count <= 180) {
+        static const uint32_t stripe_col[6] = {
+            0xFFFF0000u, 0xFFFF8000u, 0xFFFFFF00u,
+            0xFF00FF00u, 0xFF0000FFu, 0xFFFF00FFu,
+        };
+        for (int y = 0; y < fb_h; y++)
+            for (int x = 0; x < fb_w; x++)
+                sf3000_fb_mem[y * dst_stride + x] = stripe_col[x / 120];
+        struct fb_var_screeninfo vi2 = sf3000_vinfo; vi2.xoffset=0; vi2.yoffset=0;
+        ioctl(sf3000_fb_fd, FBIOPAN_DISPLAY, &vi2);
+        return;
+    }
+
+    /* Visible fb_x = 0..179 (180 px), VOP scale ≈ 8/3 → 480 physical.
+       Confirmed by user: stripe RED(120 fb_x)/ORANGE_visible(60 fb_x) = 2/3:1/3.
+       Scale 2 letterbox: write fb_x 0..179 (full 480 phys), fb_y 0..511 (512 phys). */
+    const int gw = width, gh = height;
+    const int FB_X_VIS = 180;
+    const int FB_Y_END = gw * 2;  /* scale 2: 512 for gw=256 */
+    const uint16_t *s = (const uint16_t *)src;
+    static uint32_t row_cache[180];
+    int prev_gx = -1;
+
+    for (int fb_y = 0; fb_y < FB_Y_END && fb_y < 854; fb_y++) {
+        int gx = fb_y * gw / FB_Y_END;
+        if (gx != prev_gx) {
+            for (int fb_x = 0; fb_x < FB_X_VIS; fb_x++) {
+                int gy = (FB_X_VIS - 1 - fb_x) * gh / FB_X_VIS;
+                uint16_t p = s[gy * gw + gx];
+                uint32_t r = (p >> 11) & 0x1F; r = (r << 3) | (r >> 2);
+                uint32_t g = (p >>  5) & 0x3F; g = (g << 2) | (g >> 4);
+                uint32_t b = (p)       & 0x1F; b = (b << 3) | (b >> 2);
+                row_cache[fb_x] = 0xFF000000u | (r<<16) | (g<<8) | b;
+            }
+            prev_gx = gx;
+        }
+        memcpy(sf3000_fb_mem + fb_y * dst_stride, row_cache, FB_X_VIS * 4);
+    }
+    /* Clear right border fb_y 512..853 (visible fb_x range) to black */
+    for (int fb_y = FB_Y_END; fb_y < 854; fb_y++) {
+        for (int fb_x = 0; fb_x < FB_X_VIS; fb_x++) {
+            sf3000_fb_mem[fb_y * dst_stride + fb_x] = 0xFF000000u;
+        }
+    }
+    {
+        struct fb_var_screeninfo vi = sf3000_vinfo;
+        vi.xoffset = 0; vi.yoffset = 0;
+        ioctl(sf3000_fb_fd, FBIOPAN_DISPLAY, &vi);
+    }
+}
+
+void sf3000_fb_finish(void) {
+    if (sf3000_fb_mem) {
+        munmap(sf3000_fb_mem, sf3000_fb_size);
+        sf3000_fb_mem = NULL;
+    }
+    if (sf3000_fb_fd >= 0) {
+        close(sf3000_fb_fd);
+        sf3000_fb_fd = -1;
+    }
+}
+
+#endif // PLATFORM_SF3000

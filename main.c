@@ -1,5 +1,6 @@
 // #include <png.h>
 #include <stdarg.h>
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -27,6 +28,26 @@ unsigned current_audio_buffer_size;
 char core_name[MAX_PATH];
 int config_override = 0;
 static int last_screenshot = 0;
+int g_debug_frame = 0;
+
+static void sigsegv_handler(int sig) {
+	/* fprintf is not async-signal-safe; use write() directly */
+	char buf[64];
+	int n = 0;
+	buf[n++] = 'S'; buf[n++] = 'I'; buf[n++] = 'G'; buf[n++] = '=';
+	if (sig >= 10) buf[n++] = '0' + sig / 10;
+	buf[n++] = '0' + sig % 10;
+	buf[n++] = ' '; buf[n++] = 'f';
+	int f = g_debug_frame;
+	if (f >= 1000) buf[n++] = '0' + f / 1000;
+	if (f >= 100)  buf[n++] = '0' + (f / 100) % 10;
+	if (f >= 10)   buf[n++] = '0' + (f / 10) % 10;
+	buf[n++] = '0' + f % 10;
+	buf[n++] = '\n';
+	write(2, buf, n);
+	signal(sig, SIG_DFL);
+	raise(sig);
+}
 
 static uint32_t vsyncs;
 static uint32_t renders;
@@ -528,6 +549,13 @@ static void get_tag_name(const char* in_path, char* out_tag) {
 }
 
 int main(int argc, char **argv) {
+	setvbuf(stdout, NULL, _IONBF, 0);
+	setvbuf(stderr, NULL, _IONBF, 0);
+	signal(SIGSEGV, sigsegv_handler);
+	signal(SIGBUS,  sigsegv_handler);
+	signal(SIGABRT, sigsegv_handler);
+	signal(SIGILL,  sigsegv_handler);
+	signal(SIGFPE,  sigsegv_handler);
 	char content_path[MAX_PATH];
 	char tag_name[MAX_PATH];
 
@@ -551,7 +579,7 @@ int main(int argc, char **argv) {
 	} else {
 		quit(-1);
 	}
-	
+
 	if (argc > 2 && argv[2]) {
 		strncpy(content_path, argv[2], sizeof(content_path) - 1);
 	} else {
@@ -566,7 +594,6 @@ int main(int argc, char **argv) {
 	}
 	
 	get_tag_name(content_path, tag_name);
-
 	core_extract_name(core_path, core_name, sizeof(core_name));
 
 	if (core_open(core_path, tag_name)) {
@@ -600,12 +627,20 @@ int main(int argc, char **argv) {
 	show_startup_message();
 	state_resume();
 
+	fprintf(stderr, "game loop start\n");
 	do {
+		static int lf = 0; lf++;
+		g_debug_frame = lf;
+		int log = (lf <= 5 || lf % 50 == 0 || (lf >= 185 && lf <= 220));
+		if (log) fprintf(stderr, "f%d A\n", lf);
 		count_fps();
 		adjust_audio();
+		if (log) fprintf(stderr, "f%d B\n", lf);
 		current_core.retro_run();
+		if (log) fprintf(stderr, "f%d C\n", lf);
 		if (!should_quit)
 			plat_video_flip();
+		if (log) fprintf(stderr, "f%d D\n", lf);
 	} while (!should_quit);
 
 	return quit(0);

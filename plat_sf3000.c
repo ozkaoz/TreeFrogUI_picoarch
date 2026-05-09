@@ -167,6 +167,8 @@ static const char * const in_sdl_key_names[SDLK_LAST] = {
     [SDLK_ESCAPE]     = "MENU",
 };
 
+// mod_keymap not available in SF3000 build
+/*
 static const struct mod_keymap in_sdl_mod_keymap[] = {
     { SDLK_UP,        SDLK_1 },
     { SDLK_DOWN,      SDLK_2 },
@@ -178,9 +180,10 @@ static const struct mod_keymap in_sdl_mod_keymap[] = {
     { SDLK_LALT,      SDLK_8 },
     { SDLK_RETURN,    SDLK_9 },
     { SDLK_RCTRL,     SDLK_0 },
-    { SDLK_TAB,       SDLK_q },          /* mod+L1 = L2 */
-    { SDLK_BACKSPACE, SDLK_BACKSLASH },  /* mod+R1 = R2 */
+    { SDLK_TAB,       SDLK_q },
+    { SDLK_BACKSPACE, SDLK_BACKSLASH },
 };
+*/
 
 static const struct in_pdata in_sdl_platform_data = {
     .defbinds  = in_sdl_defbinds,
@@ -189,9 +192,6 @@ static const struct in_pdata in_sdl_platform_data = {
     .joy_map   = in_sdl_joy_map,
     .jmap_size = array_size(in_sdl_joy_map),
     .key_names = in_sdl_key_names,
-    .mod_key      = SDLK_ESCAPE,
-    .mod_keymap   = in_sdl_mod_keymap,
-    .modmap_size  = array_size(in_sdl_mod_keymap),
 };
 
 #include "plat_sdl.c"
