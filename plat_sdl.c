@@ -1089,8 +1089,6 @@ int sf3000_fb_init(void) {
 }
 
 void sf3000_fb_blit(const void *src, int width, int height) {
-    static int blit_count = 0; blit_count++;
-
     /* Re-assert display controller → fb0 page 0 every frame.
        Virtual fb is 5120 lines (4 pages); something may flip yoffset
        after init. This ioctl keeps display pointed at our page 0. */
@@ -1103,46 +1101,46 @@ void sf3000_fb_blit(const void *src, int width, int height) {
         }
     }
 
-    if (blit_count <= 3 || blit_count == 60) {
-        struct fb_var_screeninfo vi;
-        ioctl(sf3000_fb_fd, FBIOGET_VSCREENINFO, &vi);
-        fprintf(stderr, "blit#%d mem=%p src=%p w=%d h=%d gw=%d gh=%d yoff=%u\n",
-                blit_count, (void*)sf3000_fb_mem, src, width, height, g_game_w, g_game_h, vi.yoffset);
-    }
     if (!sf3000_fb_mem) return;
 
     int dst_stride = (int)(sf3000_finfo.line_length / 4);
-    int fb_w = (int)sf3000_vinfo.xres;   /* 720 */
-    int fb_h = (int)sf3000_vinfo.yres;   /* 1280 */
-
-    /* Stripe test: first 180 frames — stripes by fb_x (confirms visible fb_x range).
-       Expect visible: fb_x 240..719 (physical_y 0..479 via 719-fb_x formula).
-       RED/ORANGE (fb_x 0..239) should be OFF SCREEN. */
-    if (blit_count <= 180) {
-        static const uint32_t stripe_col[6] = {
-            0xFFFF0000u, 0xFFFF8000u, 0xFFFFFF00u,
-            0xFF00FF00u, 0xFF0000FFu, 0xFFFF00FFu,
-        };
-        for (int y = 0; y < fb_h; y++)
-            for (int x = 0; x < fb_w; x++)
-                sf3000_fb_mem[y * dst_stride + x] = stripe_col[x / 120];
-        struct fb_var_screeninfo vi2 = sf3000_vinfo; vi2.xoffset=0; vi2.yoffset=0;
-        ioctl(sf3000_fb_fd, FBIOPAN_DISPLAY, &vi2);
-        return;
-    }
-
-    /* Visible fb_x = 0..179 (180 px), VOP scale ≈ 8/3 → 480 physical.
-       Confirmed by user: stripe RED(120 fb_x)/ORANGE_visible(60 fb_x) = 2/3:1/3.
-       Scale 2 letterbox: write fb_x 0..179 (full 480 phys), fb_y 0..511 (512 phys). */
-    const int gw = width, gh = height;
+    /* Confirmed FB mapping (hardware-tested via calibration bars, 2025-05):
+         physical_x = fb_y * 854 / 1014   (visible fb_y 0..1013)
+         physical_y = (179-fb_x) * 8/3    (visible fb_x 0..179 → 480 physical px)
+       Derived: GREEN bar (fb_y=763) at ~75% px; BLUE (fb_y=1014) first off-screen. */
     const int FB_X_VIS = 180;
-    const int FB_Y_END = gw * 2;  /* scale 2: 512 for gw=256 */
+    const int FB_Y_TOT = 1014;   /* visible fb_y range: fb_y 0..1013 */
+    const int PHYS_W   = 854;
+    const int PHYS_H   = 480;
+
+    const int gw = width, gh = height;
     const uint16_t *s = (const uint16_t *)src;
+
+    /* AR from core; fallback to pixel AR */
+    double ar = (aspect_ratio > 0.1) ? aspect_ratio : (double)gw / gh;
+    int disp_w = (int)(PHYS_H * ar + 0.5);  /* game width in physical_x px */
+    if (disp_w > PHYS_W) disp_w = PHYS_W;
+
+    /* Convert physical width → fb_y units, then center */
+    int fb_y_len = disp_w * FB_Y_TOT / PHYS_W;
+    int fb_y_off = (FB_Y_TOT - fb_y_len) / 2;
+
     static uint32_t row_cache[180];
+    static int last_fb_y_off = -1, last_fb_y_len = -1;
     int prev_gx = -1;
 
-    for (int fb_y = 0; fb_y < FB_Y_END && fb_y < 854; fb_y++) {
-        int gx = fb_y * gw / FB_Y_END;
+    /* Clear full fb0 to black once on layout change */
+    if (fb_y_off != last_fb_y_off || fb_y_len != last_fb_y_len) {
+        int fb_h_full = (int)sf3000_vinfo.yres;  /* 1280 */
+        for (int fy = 0; fy < fb_h_full; fy++)
+            for (int fx = 0; fx < FB_X_VIS; fx++)
+                sf3000_fb_mem[fy * dst_stride + fx] = 0xFF000000u;
+        last_fb_y_off = fb_y_off;
+        last_fb_y_len = fb_y_len;
+    }
+
+    for (int fb_y = fb_y_off; fb_y < fb_y_off + fb_y_len; fb_y++) {
+        int gx = (fb_y - fb_y_off) * gw / fb_y_len;
         if (gx != prev_gx) {
             for (int fb_x = 0; fb_x < FB_X_VIS; fb_x++) {
                 int gy = (FB_X_VIS - 1 - fb_x) * gh / FB_X_VIS;
@@ -1155,12 +1153,6 @@ void sf3000_fb_blit(const void *src, int width, int height) {
             prev_gx = gx;
         }
         memcpy(sf3000_fb_mem + fb_y * dst_stride, row_cache, FB_X_VIS * 4);
-    }
-    /* Clear right border fb_y 512..853 (visible fb_x range) to black */
-    for (int fb_y = FB_Y_END; fb_y < 854; fb_y++) {
-        for (int fb_x = 0; fb_x < FB_X_VIS; fb_x++) {
-            sf3000_fb_mem[fb_y * dst_stride + fb_x] = 0xFF000000u;
-        }
     }
     {
         struct fb_var_screeninfo vi = sf3000_vinfo;
