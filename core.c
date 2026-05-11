@@ -529,13 +529,11 @@ static void pa_input_poll(void) {
 	if (sf3000_keys_ptr) {
 		uint32_t raw = *sf3000_keys_ptr;
 
-		/* Discovery log: print on any change so user can map bits to buttons */
-		static uint32_t prev_raw = 0;
-		if (raw != prev_raw) {
-			fprintf(stderr, "SF3000 keys raw=0x%04X diff=0x%04X\n",
-			        raw & 0xFFFF, (raw ^ prev_raw) & 0xFFFF);
-			prev_raw = raw;
-		}
+		/* SELECT+START combo → open picoarch menu */
+		const uint32_t SEL_BIT   = (1u << 0);   /* SELECT = bit 0 */
+		const uint32_t START_BIT = (1u << 3);   /* START  = bit 3 */
+		if ((raw & (SEL_BIT | START_BIT)) == (SEL_BIT | START_BIT))
+			handle_emu_action(EACTION_MENU);
 
 		buttons = sf3000_keys_to_buttons(raw);
 	} else {

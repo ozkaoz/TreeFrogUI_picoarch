@@ -26,6 +26,49 @@ static SDL_Surface* screen;
    Low 16 bits = button bitmask (bit set = pressed). */
 volatile uint32_t *sf3000_keys_ptr = NULL;
 
+/* Background thread: polls cubevol and injects SDL events so menu works.
+   Derives SDL keys from sf3000_keymap[] — no duplicate bit values. */
+#include <pthread.h>
+static pthread_t sf3000_input_thread;
+extern struct sf3000_btn sf3000_keymap[];
+extern const int sf3000_keymap_count;
+
+static SDLKey sf3000_retro_to_sdlkey(int retro_id) {
+    switch (retro_id) {
+        case 4:  return SDLK_UP;      /* JOYPAD_UP    */
+        case 5:  return SDLK_DOWN;    /* JOYPAD_DOWN  */
+        case 6:  return SDLK_LEFT;    /* JOYPAD_LEFT  */
+        case 7:  return SDLK_RIGHT;   /* JOYPAD_RIGHT */
+        case 8:  return SDLK_SPACE;   /* JOYPAD_A → OK */
+        case 0:  return SDLK_LCTRL;   /* JOYPAD_B → BACK */
+        case 3:  return SDLK_ESCAPE;  /* JOYPAD_START → MENU */
+        default: return SDLK_UNKNOWN;
+    }
+}
+
+static void *sf3000_input_thread_fn(void *unused) {
+    uint32_t prev = 0;
+    while (1) {
+        usleep(16000);
+        if (!sf3000_keys_ptr) continue;
+        uint32_t cur = *sf3000_keys_ptr & 0xFFFF;
+        uint32_t changed = cur ^ prev;
+        if (!changed) continue;
+        for (int i = 0; i < sf3000_keymap_count; i++) {
+            uint32_t bit = 1u << sf3000_keymap[i].bit;
+            if (!(changed & bit)) continue;
+            SDLKey k = sf3000_retro_to_sdlkey(sf3000_keymap[i].retro_id);
+            if (k == SDLK_UNKNOWN) continue;
+            SDL_Event ev; memset(&ev, 0, sizeof(ev));
+            ev.type = (cur & bit) ? SDL_KEYDOWN : SDL_KEYUP;
+            ev.key.keysym.sym = k;
+            SDL_PushEvent(&ev);
+        }
+        prev = cur;
+    }
+    return NULL;
+}
+
 static void sf3000_keys_init(void) {
     key_t k = ftok("/tmp/joy_key", 'a');
     if (k == (key_t)-1) { fprintf(stderr, "SF3000 input: ftok failed\n"); return; }
@@ -35,6 +78,7 @@ static void sf3000_keys_init(void) {
     if (p == (void *)-1) { fprintf(stderr, "SF3000 input: shmat failed\n"); return; }
     sf3000_keys_ptr = (volatile uint32_t *)p;
     fprintf(stderr, "SF3000 input: cubevol shm OK, initial keys=0x%08X\n", *sf3000_keys_ptr);
+    pthread_create(&sf3000_input_thread, NULL, sf3000_input_thread_fn, NULL);
 }
 
 static int sf3000_fb_fd = -1;
@@ -509,7 +553,12 @@ static int audio_resample_nearest(struct audio_frame data) {
 static void *fb_flip(void)
 {
 #ifdef PLATFORM_SF3000
-	/* Blit already done in plat_video_process directly from libretro data */
+	/* Only blit during menu — game blits directly in plat_video_process */
+	if (screen && g_menuscreen_ptr) {
+		extern void sf3000_fb_blit(const void *, int, int);
+		sf3000_fb_blit(screen->pixels, screen->w, screen->h);
+
+	}
 	return screen ? screen->pixels : NULL;
 #else
 	SDL_Flip(screen);
