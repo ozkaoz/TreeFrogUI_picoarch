@@ -627,20 +627,12 @@ int main(int argc, char **argv) {
 	show_startup_message();
 	state_resume();
 
-	fprintf(stderr, "game loop start\n");
 	do {
-		static int lf = 0; lf++;
-		g_debug_frame = lf;
-		int log = (lf <= 5 || lf % 50 == 0 || (lf >= 185 && lf <= 220));
-		if (log) fprintf(stderr, "f%d A\n", lf);
 		count_fps();
 		adjust_audio();
-		if (log) fprintf(stderr, "f%d B\n", lf);
 		current_core.retro_run();
-		if (log) fprintf(stderr, "f%d C\n", lf);
 		if (!should_quit)
 			plat_video_flip();
-		if (log) fprintf(stderr, "f%d D\n", lf);
 	} while (!should_quit);
 
 	return quit(0);

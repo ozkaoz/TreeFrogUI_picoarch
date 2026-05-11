@@ -506,16 +506,12 @@ static void pa_video_refresh(const void *data, unsigned width, unsigned height, 
 }
 
 static void pa_audio_sample(int16_t left, int16_t right) {
-	if (g_debug_frame >= 189 && g_debug_frame <= 196)
-		fprintf(stderr, "f%d audio_sample\n", g_debug_frame);
 	const struct audio_frame frame = { .left = left, .right = right };
 	if (!should_quit && enable_audio)
 		plat_sound_write(&frame, 1);
 }
 
 static size_t pa_audio_sample_batch(const int16_t *data, size_t frames) {
-	if (g_debug_frame >= 189 && g_debug_frame <= 196)
-		fprintf(stderr, "f%d audio_batch frames=%zu\n", g_debug_frame, frames);
 	if (!should_quit && enable_audio)
 		plat_sound_write((const struct audio_frame *)data, frames);
 	return frames;

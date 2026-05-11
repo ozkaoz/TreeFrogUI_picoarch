@@ -652,16 +652,8 @@ void* plat_clean_screen(void) {
 	return scale_clean(framebuffer, clean_screen->pixels) ? clean_screen : NULL;
 }
 
-extern int g_debug_frame;
 void plat_video_process(const void *data, unsigned width, unsigned height, size_t pitch) {
-	static int vp_count = 0;
-	if (vp_count++ < 5 || (g_debug_frame >= 189 && g_debug_frame <= 196))
-		fprintf(stderr, "vp#%d f%d data=%p w=%u h=%u pitch=%zu\n", vp_count, g_debug_frame, data, width, height, pitch);
-	if (!data) {
-		if (g_debug_frame >= 189 && g_debug_frame <= 196)
-			fprintf(stderr, "f%d video NULL skip\n", g_debug_frame);
-		return;
-	}
+	if (!data) return;
 	framebuffer = data;
 
 	static int had_msg = 0;
@@ -684,10 +676,6 @@ void plat_video_process(const void *data, unsigned width, unsigned height, size_
 	}
 
 	if (pitch == width * 4) {
-		/* XRGB8888 path: convert directly into screen->pixels as RGB565 */
-		static int xrgb_count = 0;
-		if (xrgb_count++ < 2 || (g_debug_frame >= 189 && g_debug_frame <= 196))
-			fprintf(stderr, "f%d xrgb: data=%p w=%u h=%u pitch=%zu\n", g_debug_frame, data, width, height, pitch);
 		int x0 = ((int)SCREEN_WIDTH  - (int)width)  / 2;
 		int y0 = ((int)SCREEN_HEIGHT - (int)height) / 2;
 		if (x0 < 0) x0 = 0;
