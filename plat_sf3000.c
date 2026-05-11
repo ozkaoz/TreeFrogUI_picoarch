@@ -97,24 +97,22 @@ void buffer_scale(int w, int h, int pitch, void *data) {
    Set bit field to 0xFF to mark as unmapped / TBD.
    Mapping table: {cubevol_bit_position, RETRO_DEVICE_ID_JOYPAD_*} */
 struct sf3000_btn { uint8_t bit; uint8_t retro_id; };
-static const struct sf3000_btn sf3000_keymap[] = {
-    /* Confirmed from discovery log (diff=0x0010→bit4, diff=0x0040→bit6).
-       User pressed up/down in order: bit4=UP, bit6=DOWN.
-       TBD: LEFT, RIGHT, A, B, X, Y, L, R, SELECT, START — re-run discovery. */
-    { 4,  RETRO_DEVICE_ID_JOYPAD_UP     },  /* confirmed */
-    { 6,  RETRO_DEVICE_ID_JOYPAD_DOWN   },  /* confirmed */
-    { 5,  RETRO_DEVICE_ID_JOYPAD_LEFT   },  /* TBD guess */
-    { 7,  RETRO_DEVICE_ID_JOYPAD_RIGHT  },  /* TBD guess */
-    { 8,  RETRO_DEVICE_ID_JOYPAD_A      },  /* TBD */
-    { 9,  RETRO_DEVICE_ID_JOYPAD_B      },  /* TBD */
-    { 10, RETRO_DEVICE_ID_JOYPAD_X      },  /* TBD */
-    { 11, RETRO_DEVICE_ID_JOYPAD_Y      },  /* TBD */
-    { 12, RETRO_DEVICE_ID_JOYPAD_L      },  /* TBD */
-    { 13, RETRO_DEVICE_ID_JOYPAD_R      },  /* TBD */
-    { 14, RETRO_DEVICE_ID_JOYPAD_SELECT },  /* TBD */
-    { 15, RETRO_DEVICE_ID_JOYPAD_START  },  /* TBD */
+/* Mutable — filled in by sf3000_calibrate_input() at startup */
+struct sf3000_btn sf3000_keymap[] = {
+    { 4,  RETRO_DEVICE_ID_JOYPAD_UP     },
+    { 6,  RETRO_DEVICE_ID_JOYPAD_DOWN   },
+    { 5,  RETRO_DEVICE_ID_JOYPAD_LEFT   },
+    { 7,  RETRO_DEVICE_ID_JOYPAD_RIGHT  },
+    { 8,  RETRO_DEVICE_ID_JOYPAD_A      },
+    { 9,  RETRO_DEVICE_ID_JOYPAD_B      },
+    { 10, RETRO_DEVICE_ID_JOYPAD_X      },
+    { 11, RETRO_DEVICE_ID_JOYPAD_Y      },
+    { 12, RETRO_DEVICE_ID_JOYPAD_L      },
+    { 13, RETRO_DEVICE_ID_JOYPAD_R      },
+    { 14, RETRO_DEVICE_ID_JOYPAD_SELECT },
+    { 15, RETRO_DEVICE_ID_JOYPAD_START  },
 };
-#define SF3000_MENU_BIT  14   /* bit that triggers picoarch menu */
+const int sf3000_keymap_count = (int)(sizeof(sf3000_keymap)/sizeof(sf3000_keymap[0]));
 
 uint32_t sf3000_keys_to_buttons(uint32_t raw) {
     uint32_t result = 0;

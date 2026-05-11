@@ -956,6 +956,8 @@ int plat_init(void)
     }
 
     sf3000_keys_init();
+    extern void sf3000_calibrate_input(void);
+    sf3000_calibrate_input();
 
     return 0;
 #else
@@ -1166,6 +1168,68 @@ void sf3000_fb_blit(const void *src, int width, int height) {
         vi.xoffset = 0; vi.yoffset = 0;
         ioctl(sf3000_fb_fd, FBIOPAN_DISPLAY, &vi);
     }
+}
+
+/* On-screen button calibration: shows "PRESS: UP", waits for key, records bit.
+   Updates sf3000_keymap[] in plat_sf3000.c and logs results to stderr. */
+extern struct sf3000_btn sf3000_keymap[];
+extern const int sf3000_keymap_count;
+
+static void sf3000_calib_frame(const char *prompt, const char *sub) {
+    /* Render text into a 256x224 RGB565 buffer then display via sf3000_fb_blit */
+    static uint16_t cbuf[256 * 224];
+    memset(cbuf, 0x00, sizeof(cbuf));  /* black background */
+    /* White text: 0xFFFF in RGB565 */
+    basic_text_out16_nf(cbuf, 256,  8, 90,  "BUTTON CALIBRATION");
+    basic_text_out16_nf(cbuf, 256,  8, 106, "-------------------");
+    basic_text_out16_nf(cbuf, 256,  8, 130, prompt);
+    basic_text_out16_nf(cbuf, 256,  8, 146, sub);
+    basic_text_out16_nf(cbuf, 256,  8, 170, "Press the button shown");
+    sf3000_fb_blit(cbuf, 256, 224);
+}
+
+void sf3000_calibrate_input(void) {
+    if (!sf3000_keys_ptr) {
+        fprintf(stderr, "SF3000 calib: no shm, skipping\n");
+        return;
+    }
+
+    static const struct { const char *name; int retro_id; } cbtns[] = {
+        {"UP",     4 }, {"DOWN",   5 }, {"LEFT",   6 }, {"RIGHT",  7 },
+        {"A",      8 }, {"B",      0 }, {"X",      9 }, {"Y",      1 },
+        {"L",      10}, {"R",      11}, {"SELECT",  2 }, {"START",   3 },
+    };
+    const int N = (int)(sizeof(cbtns)/sizeof(cbtns[0]));
+
+    for (int i = 0; i < N; i++) {
+        char prompt[32], sub[32];
+        snprintf(prompt, sizeof(prompt), "PRESS: %s", cbtns[i].name);
+        snprintf(sub,    sizeof(sub),    "(%d / %d)", i + 1, N);
+
+        /* flush any held keys */
+        while (*sf3000_keys_ptr & 0xFFFF) usleep(16000);
+
+        uint32_t pressed = 0;
+        while (!pressed) {
+            sf3000_calib_frame(prompt, sub);
+            usleep(33333);
+            uint32_t cur = *sf3000_keys_ptr & 0xFFFF;
+            if (cur) pressed = cur;
+        }
+
+        int bit = __builtin_ctz(pressed);  /* lowest set bit */
+        sf3000_keymap[i].bit      = (uint8_t)bit;
+        sf3000_keymap[i].retro_id = (uint8_t)cbtns[i].retro_id;
+        fprintf(stderr, "CALIB: %-8s bit=%2d (0x%04X)\n", cbtns[i].name, bit, pressed);
+
+        /* wait for release */
+        while (*sf3000_keys_ptr & pressed) {
+            sf3000_calib_frame(prompt, sub);
+            usleep(16000);
+        }
+    }
+
+    fprintf(stderr, "CALIB: done\n");
 }
 
 void sf3000_fb_finish(void) {
