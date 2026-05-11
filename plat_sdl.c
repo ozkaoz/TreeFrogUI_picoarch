@@ -960,8 +960,15 @@ int plat_init(void)
     extern void sf3000_load_keymap(void);
     /* Load saved mapping if exists, else run one-time calibration */
     {
+        /* Count lines in keymap file — only skip calibration if all 12 mapped */
+        int _mapped = 0;
         FILE *_kf = fopen("/mnt/sdcard/sf3000_keymap.txt", "r");
-        if (_kf) { fclose(_kf); sf3000_load_keymap(); }
+        if (_kf) {
+            char _l[32];
+            while (fgets(_l, sizeof(_l), _kf)) _mapped++;
+            fclose(_kf);
+        }
+        if (_mapped >= 12) sf3000_load_keymap();
         else sf3000_calibrate_input();
     }
 
@@ -1232,6 +1239,16 @@ void sf3000_calibrate_input(void) {
         sf3000_keymap[i].retro_id = (uint8_t)cbtns[i].retro_id;
         fprintf(stderr, "CALIB: %-8s bit=%2d (0x%04X)\n", cbtns[i].name, bit, pressed);
         fflush(stderr);
+
+        /* Save incrementally so partial mapping survives early exit */
+        {
+            FILE *_f = fopen("/mnt/sdcard/sf3000_keymap.txt", "w");
+            if (_f) {
+                for (int j = 0; j <= i; j++)
+                    fprintf(_f, "%s %d\n", cbtns[j].name, sf3000_keymap[j].bit);
+                fclose(_f);
+            }
+        }
 
         /* wait for release */
         while (*sf3000_keys_ptr & pressed) {
