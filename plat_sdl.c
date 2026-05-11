@@ -13,12 +13,29 @@
 
 static SDL_Surface* screen;
 
-// SF3000 raw framebuffer support
+// SF3000 raw framebuffer + input support
 #ifdef PLATFORM_SF3000
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 #include <linux/fb.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+
+/* cubevol shared memory: ftok("/tmp/joy_key", 'a') → 4-byte key state.
+   Low 16 bits = button bitmask (bit set = pressed). */
+volatile uint32_t *sf3000_keys_ptr = NULL;
+
+static void sf3000_keys_init(void) {
+    key_t k = ftok("/tmp/joy_key", 'a');
+    if (k == (key_t)-1) { fprintf(stderr, "SF3000 input: ftok failed\n"); return; }
+    int id = shmget(k, 4, 0666);
+    if (id < 0) { fprintf(stderr, "SF3000 input: shmget failed\n"); return; }
+    void *p = shmat(id, NULL, 0);
+    if (p == (void *)-1) { fprintf(stderr, "SF3000 input: shmat failed\n"); return; }
+    sf3000_keys_ptr = (volatile uint32_t *)p;
+    fprintf(stderr, "SF3000 input: cubevol shm OK, initial keys=0x%08X\n", *sf3000_keys_ptr);
+}
 
 static int sf3000_fb_fd = -1;
 static uint32_t *sf3000_fb_mem = NULL;
@@ -949,6 +966,8 @@ int plat_init(void)
     if (plat_sound_init()) {
         PA_ERROR("SF3000 SDL sound failed to init (continuing without audio): %s\n", SDL_GetError());
     }
+
+    sf3000_keys_init();
 
     return 0;
 #else

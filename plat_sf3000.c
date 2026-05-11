@@ -88,11 +88,45 @@ void buffer_scale(int w, int h, int pitch, void *data) {
 */
 
 // plat_sf3000.c
-// Only platform-specific overrides or stubs for sf3000. All common SDL1.2 code is now provided by plat_sdl.c.
+#ifdef PLATFORM_SF3000
+#include <stdint.h>
+#include "libretro.h"
 
-// Add platform-specific code here only if needed.
+/* cubevol bit → libretro button mapping.
+   Bits confirmed via discovery log (press each button, note which bit flips).
+   Set bit field to 0xFF to mark as unmapped / TBD.
+   Mapping table: {cubevol_bit_position, RETRO_DEVICE_ID_JOYPAD_*} */
+struct sf3000_btn { uint8_t bit; uint8_t retro_id; };
+static const struct sf3000_btn sf3000_keymap[] = {
+    /* --- DISCOVERED MAPPING (update after running discovery log) --- */
+    { 0,  RETRO_DEVICE_ID_JOYPAD_UP     },
+    { 1,  RETRO_DEVICE_ID_JOYPAD_DOWN   },
+    { 2,  RETRO_DEVICE_ID_JOYPAD_LEFT   },
+    { 3,  RETRO_DEVICE_ID_JOYPAD_RIGHT  },
+    { 4,  RETRO_DEVICE_ID_JOYPAD_A      },
+    { 5,  RETRO_DEVICE_ID_JOYPAD_B      },
+    { 6,  RETRO_DEVICE_ID_JOYPAD_X      },
+    { 7,  RETRO_DEVICE_ID_JOYPAD_Y      },
+    { 8,  RETRO_DEVICE_ID_JOYPAD_L      },
+    { 9,  RETRO_DEVICE_ID_JOYPAD_R      },
+    { 10, RETRO_DEVICE_ID_JOYPAD_L2     },
+    { 11, RETRO_DEVICE_ID_JOYPAD_R2     },
+    { 12, RETRO_DEVICE_ID_JOYPAD_SELECT },
+    { 13, RETRO_DEVICE_ID_JOYPAD_START  },
+};
+#define SF3000_MENU_BIT  14   /* bit that triggers picoarch menu */
 
-// Input system
+uint32_t sf3000_keys_to_buttons(uint32_t raw) {
+    uint32_t result = 0;
+    for (int i = 0; i < (int)(sizeof(sf3000_keymap)/sizeof(sf3000_keymap[0])); i++) {
+        if (raw & (1u << sf3000_keymap[i].bit))
+            result |= (1u << sf3000_keymap[i].retro_id);
+    }
+    return result;
+}
+#endif
+
+// Input system (SDL fallback binds, not used on SF3000 but required to compile)
 static const struct in_default_bind in_sdl_defbinds[] = {
     { SDLK_UP,        IN_BINDTYPE_PLAYER12, RETRO_DEVICE_ID_JOYPAD_UP },
     { SDLK_DOWN,      IN_BINDTYPE_PLAYER12, RETRO_DEVICE_ID_JOYPAD_DOWN },

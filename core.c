@@ -522,26 +522,32 @@ static size_t pa_audio_sample_batch(const int16_t *data, size_t frames) {
 }
 
 static void pa_input_poll(void) {
-	if (g_debug_frame >= 189 && g_debug_frame <= 196)
-		fprintf(stderr, "f%d input_poll\n", g_debug_frame);
 	int actions[IN_BINDTYPE_COUNT] = { 0, };
-	unsigned int emu_act;
-	int which = EACTION_NONE;
-
-	if (g_debug_frame >= 189 && g_debug_frame <= 196)
-		fprintf(stderr, "f%d in_update_before\n", g_debug_frame);
 	in_update(actions);
-	if (g_debug_frame >= 189 && g_debug_frame <= 196)
-		fprintf(stderr, "f%d in_update_after\n", g_debug_frame);
-	emu_act = actions[IN_BINDTYPE_EMU];
-	if (emu_act) {
-		for (; !(emu_act & 1); emu_act >>= 1, which++)
-			;
-		emu_act = which;
-	}
-	handle_emu_action(which);
+	handle_emu_action(EACTION_NONE);
 
+#ifdef PLATFORM_SF3000
+	extern volatile uint32_t *sf3000_keys_ptr;
+	extern uint32_t sf3000_keys_to_buttons(uint32_t);
+
+	if (sf3000_keys_ptr) {
+		uint32_t raw = *sf3000_keys_ptr;
+
+		/* Discovery log: print on any change so user can map bits to buttons */
+		static uint32_t prev_raw = 0;
+		if (raw != prev_raw) {
+			fprintf(stderr, "SF3000 keys raw=0x%04X diff=0x%04X\n",
+			        raw & 0xFFFF, (raw ^ prev_raw) & 0xFFFF);
+			prev_raw = raw;
+		}
+
+		buttons = sf3000_keys_to_buttons(raw);
+	} else {
+		buttons = actions[IN_BINDTYPE_PLAYER12];
+	}
+#else
 	buttons = actions[IN_BINDTYPE_PLAYER12];
+#endif
 }
 
 static int16_t pa_input_state(unsigned port, unsigned device, unsigned index, unsigned id) {
