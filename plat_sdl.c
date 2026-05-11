@@ -1171,8 +1171,12 @@ void sf3000_fb_blit(const void *src, int width, int height) {
     for (int fb_y = fb_y_off; fb_y < fb_y_off + fb_y_len; fb_y++) {
         int gx = (fb_y - fb_y_off) * gw / fb_y_len;
         if (gx != prev_gx) {
-            for (int fb_x = 0; fb_x < FB_X_VIS; fb_x++) {
-                int gy = (FB_X_VIS - 1 - fb_x) * gh / FB_X_VIS;
+            /* Iterate gy (source rows) not fb_x — ensures ALL gh rows are
+               sampled. With gh=224 > FB_X_VIS=180 the old loop skipped ~44
+               rows; iterating gy gives nearest-neighbour correctness. */
+            for (int gy = 0; gy < gh; gy++) {
+                int fb_x = (FB_X_VIS - 1) - gy * FB_X_VIS / gh;
+                if (fb_x < 0 || fb_x >= FB_X_VIS) continue;
                 uint16_t p = s[gy * gw + gx];
                 uint32_t r = (p >> 11) & 0x1F; r = (r << 3) | (r >> 2);
                 uint32_t g = (p >>  5) & 0x3F; g = (g << 2) | (g >> 4);
@@ -1193,17 +1197,48 @@ void sf3000_fb_blit(const void *src, int width, int height) {
 extern struct sf3000_btn sf3000_keymap[];
 extern const int sf3000_keymap_count;
 
-static void sf3000_show_frame(const char *l1, const char *l2, const char *l3,
-                               const char *l4, const char *l5, const char *l6) {
-    static uint16_t cbuf[256 * 224];
-    memset(cbuf, 0x00, sizeof(cbuf));
-    if (l1) basic_text_out16_nf(cbuf, 256, 4,  8,  l1);
-    if (l2) basic_text_out16_nf(cbuf, 256, 4,  24, l2);
-    if (l3) basic_text_out16_nf(cbuf, 256, 4,  40, l3);
-    if (l4) basic_text_out16_nf(cbuf, 256, 4,  56, l4);
-    if (l5) basic_text_out16_nf(cbuf, 256, 4,  72, l5);
-    if (l6) basic_text_out16_nf(cbuf, 256, 4,  88, l6);
-    sf3000_fb_blit(cbuf, 256, 224);
+/* Native text: writes fontdata8x8 glyphs directly to fb0.
+   physical_x = fb_y * 854/1014, physical_y = (179-fb_x) * 8/3.
+   2 fb_y per font column (squarifies pixels), 1 fb_x per row. */
+static void sf3000_text_native(int px, int py, const char *text, uint32_t color) {
+    if (!sf3000_fb_mem) return;
+    int dst_stride = (int)(sf3000_finfo.line_length / 4);
+    int fb_y_base = px * 1014 / 854;
+    for (int i = 0; text[i]; i++) {
+        unsigned char c = (unsigned char)text[i];
+        for (int row = 0; row < 8; row++) {
+            unsigned char fd = fontdata8x8[c * 8 + row];
+            if (!fd) continue;
+            int fb_x = 179 - (py + row) * 180 / 480;
+            if (fb_x < 0 || fb_x > 179) continue;
+            for (int col = 0; col < 8; col++) {
+                if (fd & (0x80 >> col)) {
+                    int fy = fb_y_base + col * 2;
+                    if (fy >= 0 && fy < 1013) {
+                        sf3000_fb_mem[fy * dst_stride + fb_x] = color;
+                        sf3000_fb_mem[(fy+1) * dst_stride + fb_x] = color;
+                    }
+                }
+            }
+        }
+        fb_y_base += 18;  /* 8 cols × 2 + 2 spacing */
+    }
+}
+
+static void sf3000_show_frame_native(const char **lines, int nlines) {
+    if (!sf3000_fb_mem) return;
+    int dst_stride = (int)(sf3000_finfo.line_length / 4);
+    for (int fy = 0; fy < 1014; fy++)
+        for (int fx = 0; fx < 180; fx++)
+            sf3000_fb_mem[fy * dst_stride + fx] = 0xFF000000u;
+    int py = 10;
+    for (int i = 0; i < nlines; i++) {
+        if (lines[i]) sf3000_text_native(20, py, lines[i], 0xFFFFFFFFu);
+        py += 30;
+    }
+    struct fb_var_screeninfo vi = sf3000_vinfo;
+    vi.xoffset = vi.yoffset = 0;
+    ioctl(sf3000_fb_fd, FBIOPAN_DISPLAY, &vi);
 }
 
 void sf3000_calibrate_input(void) {
@@ -1212,7 +1247,7 @@ void sf3000_calibrate_input(void) {
     static const char *bnames[] = {
         "UP","DOWN","LEFT","RIGHT","A","B","X","Y","L","R","L2","R2","SELECT","START" };
     const int N = 14;
-    uint32_t captured[12];
+    uint32_t captured[14];
     for (int i = 0; i < N; i++) captured[i] = 0xFF;
 
     for (int i = 0; i < N; i++) {
@@ -1226,8 +1261,9 @@ void sf3000_calibrate_input(void) {
 
         uint32_t pressed = 0;
         int ticks = 0;
-        while (!pressed && ticks < 180) {  /* 3s timeout */
-            sf3000_show_frame(prompt, sub, hint, NULL, NULL, NULL);
+        const char *flines[3] = { prompt, sub, hint };
+        while (!pressed && ticks < 180) {
+            sf3000_show_frame_native(flines, 3);
             usleep(16000);
             ticks++;
             uint32_t cur = *sf3000_keys_ptr & 0xFFFF;
@@ -1235,8 +1271,10 @@ void sf3000_calibrate_input(void) {
         }
         if (pressed) {
             captured[i] = pressed;
-            /* wait for release max 2s */
-            for (int t = 0; t < 120 && (*sf3000_keys_ptr & pressed); t++) usleep(16000);
+            for (int t = 0; t < 120 && (*sf3000_keys_ptr & pressed); t++) {
+                sf3000_show_frame_native(flines, 3);
+                usleep(16000);
+            }
         }
     }
 
@@ -1256,8 +1294,9 @@ void sf3000_calibrate_input(void) {
     for (int i = 0; i < 6; i++) fprintf(stderr, "%s\n", lines[i]);
     fflush(stderr);
 
+    const char *slines[6] = { lines[0], lines[1], lines[2], lines[3], lines[4], lines[5] };
     while (1) {
-        sf3000_show_frame(lines[0], lines[1], lines[2], lines[3], lines[4], lines[5]);
+        sf3000_show_frame_native(slines, 6);
         usleep(100000);
     }
 }
