@@ -97,20 +97,24 @@ void buffer_scale(int w, int h, int pitch, void *data) {
    Set bit field to 0xFF to mark as unmapped / TBD.
    Mapping table: {cubevol_bit_position, RETRO_DEVICE_ID_JOYPAD_*} */
 struct sf3000_btn { uint8_t bit; uint8_t retro_id; };
-/* Mutable — filled in by sf3000_calibrate_input() at startup */
+/* Confirmed via on-device calibration 2026-05.
+   D-pad: UP=4 DOWN=6 LEFT=7 RIGHT=5
+   Action: A=13 B=14 X=15 Y=12 (X/Y guessed)
+   Shoulders: L=8 R=9 (guessed)
+   System: SELECT=0 START=1 (guessed — re-run calib if wrong) */
 struct sf3000_btn sf3000_keymap[] = {
     { 4,  RETRO_DEVICE_ID_JOYPAD_UP     },
     { 6,  RETRO_DEVICE_ID_JOYPAD_DOWN   },
-    { 5,  RETRO_DEVICE_ID_JOYPAD_LEFT   },
-    { 7,  RETRO_DEVICE_ID_JOYPAD_RIGHT  },
-    { 8,  RETRO_DEVICE_ID_JOYPAD_A      },
-    { 9,  RETRO_DEVICE_ID_JOYPAD_B      },
-    { 10, RETRO_DEVICE_ID_JOYPAD_X      },
-    { 11, RETRO_DEVICE_ID_JOYPAD_Y      },
-    { 12, RETRO_DEVICE_ID_JOYPAD_L      },
-    { 13, RETRO_DEVICE_ID_JOYPAD_R      },
-    { 14, RETRO_DEVICE_ID_JOYPAD_SELECT },
-    { 15, RETRO_DEVICE_ID_JOYPAD_START  },
+    { 7,  RETRO_DEVICE_ID_JOYPAD_LEFT   },
+    { 5,  RETRO_DEVICE_ID_JOYPAD_RIGHT  },
+    { 13, RETRO_DEVICE_ID_JOYPAD_A      },
+    { 14, RETRO_DEVICE_ID_JOYPAD_B      },
+    { 15, RETRO_DEVICE_ID_JOYPAD_X      },
+    { 12, RETRO_DEVICE_ID_JOYPAD_Y      },
+    { 8,  RETRO_DEVICE_ID_JOYPAD_L      },
+    { 9,  RETRO_DEVICE_ID_JOYPAD_R      },
+    { 0,  RETRO_DEVICE_ID_JOYPAD_SELECT },
+    { 1,  RETRO_DEVICE_ID_JOYPAD_START  },
 };
 const int sf3000_keymap_count = (int)(sizeof(sf3000_keymap)/sizeof(sf3000_keymap[0]));
 

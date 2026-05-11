@@ -957,7 +957,13 @@ int plat_init(void)
 
     sf3000_keys_init();
     extern void sf3000_calibrate_input(void);
-    sf3000_calibrate_input();
+    extern void sf3000_load_keymap(void);
+    /* Load saved mapping if exists, else run one-time calibration */
+    {
+        FILE *_kf = fopen("/mnt/sdcard/sf3000_keymap.txt", "r");
+        if (_kf) { fclose(_kf); sf3000_load_keymap(); }
+        else sf3000_calibrate_input();
+    }
 
     return 0;
 #else
@@ -1189,10 +1195,12 @@ static void sf3000_calib_frame(const char *prompt, const char *sub) {
 }
 
 void sf3000_calibrate_input(void) {
+    fprintf(stderr, "SF3000 calib: starting\n");
     if (!sf3000_keys_ptr) {
         fprintf(stderr, "SF3000 calib: no shm, skipping\n");
         return;
     }
+    fprintf(stderr, "SF3000 calib: shm ok, showing screen\n");
 
     static const struct { const char *name; int retro_id; } cbtns[] = {
         {"UP",     4 }, {"DOWN",   5 }, {"LEFT",   6 }, {"RIGHT",  7 },
@@ -1210,6 +1218,8 @@ void sf3000_calibrate_input(void) {
         while (*sf3000_keys_ptr & 0xFFFF) usleep(16000);
 
         uint32_t pressed = 0;
+        fprintf(stderr, "SF3000 calib: waiting for %s\n", cbtns[i].name);
+        fflush(stderr);
         while (!pressed) {
             sf3000_calib_frame(prompt, sub);
             usleep(33333);
@@ -1221,6 +1231,7 @@ void sf3000_calibrate_input(void) {
         sf3000_keymap[i].bit      = (uint8_t)bit;
         sf3000_keymap[i].retro_id = (uint8_t)cbtns[i].retro_id;
         fprintf(stderr, "CALIB: %-8s bit=%2d (0x%04X)\n", cbtns[i].name, bit, pressed);
+        fflush(stderr);
 
         /* wait for release */
         while (*sf3000_keys_ptr & pressed) {
@@ -1229,7 +1240,34 @@ void sf3000_calibrate_input(void) {
         }
     }
 
-    fprintf(stderr, "CALIB: done\n");
+    /* Save mapping to file — skip calibration on next boot if file exists */
+    FILE *kf = fopen("/mnt/sdcard/sf3000_keymap.txt", "w");
+    if (kf) {
+        for (int i = 0; i < N; i++)
+            fprintf(kf, "%s %d\n", cbtns[i].name, sf3000_keymap[i].bit);
+        fclose(kf);
+    }
+    fprintf(stderr, "CALIB: done, mapping saved\n");
+    fflush(stderr);
+}
+
+void sf3000_load_keymap(void) {
+    static const char *names[] = {
+        "UP","DOWN","LEFT","RIGHT","A","B","X","Y","L","R","SELECT","START" };
+    static const int retro_ids[] = { 4,5,6,7,8,0,9,1,10,11,2,3 };
+    FILE *f = fopen("/mnt/sdcard/sf3000_keymap.txt", "r");
+    if (!f) return;
+    char name[16]; int bit;
+    while (fscanf(f, "%15s %d", name, &bit) == 2) {
+        for (int i = 0; i < 12; i++) {
+            if (strcmp(name, names[i]) == 0) {
+                sf3000_keymap[i].bit      = (uint8_t)bit;
+                sf3000_keymap[i].retro_id = (uint8_t)retro_ids[i];
+            }
+        }
+    }
+    fclose(f);
+    fprintf(stderr, "SF3000 input: loaded keymap from file\n");
 }
 
 void sf3000_fb_finish(void) {
