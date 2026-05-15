@@ -90,7 +90,7 @@ static size_t sf3000_fb_size = 0;
 
 // Forward declarations
 int sf3000_fb_init(void);
-void sf3000_fb_blit(const void *src, int width, int height);
+void sf3000_fb_blit(const void *src, int width, int height, int pitch);
 void sf3000_fb_finish(void);
 static void sf3000_text_native(int px, int py, const char *text, uint32_t color, int page_y_offset);
 
@@ -557,8 +557,8 @@ static void *fb_flip(void)
 #ifdef PLATFORM_SF3000
 	/* Only blit during menu — game blits directly in plat_video_process */
 	if (screen && g_menuscreen_ptr) {
-		extern void sf3000_fb_blit(const void *, int, int);
-		sf3000_fb_blit(screen->pixels, screen->w, screen->h);
+		extern void sf3000_fb_blit(const void *, int, int, int);
+		sf3000_fb_blit(screen->pixels, screen->w, screen->h, screen->pitch);
 
 	}
 	return screen ? screen->pixels : NULL;
@@ -722,16 +722,16 @@ void plat_video_process(const void *data, unsigned width, unsigned height, size_
 
 #ifdef PLATFORM_SF3000
 	if (pitch == width * 2) {
-		/* RGB565: blit directly to fb0, bypass staging buffer entirely.
-		   Staging had x0/y0 offsets and wrong stride=320 instead of gw. */
+		/* RGB565: blit directly to fb0, bypass staging buffer entirely. */
 		g_game_w = (int)width; g_game_h = (int)height;
 		SDL_UnlockSurface(screen);
 		video_update_msg();
-		sf3000_fb_blit(data, (int)width, (int)height);
+		sf3000_fb_blit(data, (int)width, (int)height, (int)pitch);
 		return;
 	}
 
 	if (pitch == width * 4) {
+		/* RGB8888 path: convert to 16-bit and blit. */
 		int x0 = ((int)SCREEN_WIDTH  - (int)width)  / 2;
 		int y0 = ((int)SCREEN_HEIGHT - (int)height) / 2;
 		if (x0 < 0) x0 = 0;
@@ -752,6 +752,7 @@ void plat_video_process(const void *data, unsigned width, unsigned height, size_
 		}
 		SDL_UnlockSurface(screen);
 		video_update_msg();
+		sf3000_fb_blit(screen->pixels, SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_WIDTH * 2);
 		return;
 	}
 #endif
@@ -1248,7 +1249,7 @@ int sf3000_fb_init(void) {
 
 static int sf3000_last_gh = -1;
 static int sf3000_current_page = 0;
-static uint32_t *sf3000_rotated_src = NULL;
+static uint16_t *sf3000_rotated_src = NULL;
 static int sf3000_rotated_capacity = 0;
 
 struct sf3000_blend_data {
@@ -1257,7 +1258,14 @@ struct sf3000_blend_data {
 };
 static struct sf3000_blend_data sf3000_blend_lut[1024];
 
-void sf3000_fb_blit(const void *src, int width, int height) {
+static inline uint32_t cvt565(uint16_t c) {
+    return 0xFF000000u |
+           (((c & 0xF800) << 8) | ((c & 0xE000) << 3)) |
+           (((c & 0x07E0) << 5) | ((c & 0x0600) >> 1)) |
+           (((c & 0x001F) << 3) | ((c & 0x001C) >> 2));
+}
+
+void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
     /* Re-assert display controller → fb0 page.
        Virtual fb is 5120 lines (4 pages). This ioctl keeps display pointed at our page. */
     {
@@ -1270,7 +1278,6 @@ void sf3000_fb_blit(const void *src, int width, int height) {
     }
 
     if (!sf3000_fb_mem) return;
-
 
     int dst_stride = (int)(sf3000_finfo.line_length / 4);
     const int FB_X_VIS = 180;
@@ -1285,17 +1292,14 @@ void sf3000_fb_blit(const void *src, int width, int height) {
     if (gw * gh > sf3000_rotated_capacity) {
         if (sf3000_rotated_src) free(sf3000_rotated_src);
         sf3000_rotated_capacity = gw * gh + 8192;
-        sf3000_rotated_src = malloc(sf3000_rotated_capacity * sizeof(uint32_t));
+        sf3000_rotated_src = malloc(sf3000_rotated_capacity * sizeof(uint16_t));
     }
 
+    /* Fast, pure-data transpose pass. Great for CPU cache. */
     for (int gy = 0; gy < gh; gy++) {
-        const uint16_t *src_row = s + gy * gw;
+        const uint16_t *src_row = (const uint16_t *)((const char *)s + gy * pitch);
         for (int gx = 0; gx < gw; gx++) {
-            uint16_t color = src_row[gx];
-            uint32_t r = (color >> 11) & 0x1F; r = (r << 3) | (r >> 2);
-            uint32_t g = (color >>  5) & 0x3F; g = (g << 2) | (g >> 4);
-            uint32_t b = (color)       & 0x1F; b = (b << 3) | (b >> 2);
-            sf3000_rotated_src[gx * gh + gy] = 0xFF000000u | (r<<16) | (g<<8) | b;
+            sf3000_rotated_src[gx * gh + gy] = src_row[gx];
         }
     }
 
@@ -1314,10 +1318,25 @@ void sf3000_fb_blit(const void *src, int width, int height) {
         sf3000_last_gh = gh;
     }
 
-    /* AR from core; fallback to pixel AR */
-    double ar = (aspect_ratio > 0.1) ? aspect_ratio : (double)gw / gh;
-    int disp_w = (int)(PHYS_H * ar + 0.5);  /* game width in physical_x px */
+    int current_scale = scale_size;
+    if (src == screen->pixels) {
+        current_scale = SCALE_SIZE_ASPECT; /* Force menu to not stretch */
+    }
+
+    int disp_w = PHYS_W;
+    if (current_scale == SCALE_SIZE_ASPECT) {
+        double ar = (aspect_ratio > 0.1) ? aspect_ratio : (double)gw / gh;
+        disp_w = (int)(PHYS_H * ar + 0.5);
+    } else if (current_scale == SCALE_SIZE_NONE) {
+        /* Native pixels, roughly centered.
+           Since gh is scaled to PHYS_H, we scale gw accordingly. */
+        disp_w = (int)(PHYS_H * ((double)gw / gh) + 0.5);
+        /* If user REALLY wants no scaling, we'd need to change gh mapping too.
+           For now, let's just support FULL and ASPECT properly. */
+    }
+    
     if (disp_w > PHYS_W) disp_w = PHYS_W;
+    if (current_scale == SCALE_SIZE_FULL) disp_w = PHYS_W;
 
     /* Convert physical width → fb_y units, then center */
     int fb_y_len = disp_w * FB_Y_TOT / PHYS_W;
@@ -1343,27 +1362,56 @@ void sf3000_fb_blit(const void *src, int width, int height) {
         last_fb_y_len = fb_y_len;
     }
 
-    for (int fb_y = fb_y_off; fb_y < fb_y_off + fb_y_len; fb_y++) {
+    int fb_y = fb_y_off;
+    while (fb_y < fb_y_off + fb_y_len) {
         int gx = (fb_y - fb_y_off) * gw / fb_y_len;
-        if (gx != prev_gx) {
-            uint32_t *src_row = sf3000_rotated_src + gx * gh;
-            for (int fb_x = 0; fb_x < FB_X_VIS; fb_x++) {
-                uint32_t c1 = src_row[sf3000_blend_lut[fb_x].gy1];
-                uint32_t c2 = src_row[sf3000_blend_lut[fb_x].gy2];
-                uint32_t w1 = sf3000_blend_lut[fb_x].w1;
-                uint32_t w2 = sf3000_blend_lut[fb_x].w2;
+        
+        /* Count how many lines share this exact gx (nearest neighbor vertical scaling) */
+        int count = 1;
+        while (fb_y + count < fb_y_off + fb_y_len && ((fb_y + count - fb_y_off) * gw / fb_y_len) == gx) {
+            count++;
+        }
+        
+        /* Compute the blended 32-bit row ONLY ONCE for these `count` lines */
+        uint16_t *src_col = sf3000_rotated_src + gx * gh;
+        for (int fb_x = 0; fb_x < FB_X_VIS; fb_x++) {
+            int gy1 = sf3000_blend_lut[fb_x].gy1;
+            int gy2 = sf3000_blend_lut[fb_x].gy2;
+            uint32_t w1 = sf3000_blend_lut[fb_x].w1;
+            uint32_t w2 = sf3000_blend_lut[fb_x].w2;
 
-                if (w2 == 0 || c1 == c2) {
-                    row_cache[fb_x] = c1;
+            uint16_t p1 = src_col[gy1];
+
+            if (w2 == 0 || gy1 == gy2) {
+                row_cache[fb_x] = cvt565(p1);
+            } else {
+                uint16_t p2 = src_col[gy2];
+                if (p1 == p2) {
+                    row_cache[fb_x] = cvt565(p1);
                 } else {
+                    uint32_t c1 = cvt565(p1);
+                    uint32_t c2 = cvt565(p2);
                     uint32_t rb = (((c1 & 0xFF00FF) * w1 + (c2 & 0xFF00FF) * w2) >> 7) & 0xFF00FF;
                     uint32_t g  = (((c1 & 0x00FF00) * w1 + (c2 & 0x00FF00) * w2) >> 7) & 0x00FF00;
                     row_cache[fb_x] = 0xFF000000u | rb | g;
                 }
             }
-            prev_gx = gx;
         }
-        memcpy(sf3000_fb_mem + (page_y_offset + fb_y) * dst_stride, row_cache, FB_X_VIS * 4);
+        
+        /* Blit the computed row `count` times to the framebuffer */
+        uint32_t *dst = sf3000_fb_mem + (page_y_offset + fb_y) * dst_stride;
+        for (int i = 0; i < count; i++) {
+            memcpy(dst, row_cache, FB_X_VIS * 4);
+            dst += dst_stride;
+        }
+        
+        fb_y += count;
+    }
+
+    if (msg[0]) {
+        /* Draw overlay text (FPS, CPU load, etc.) 
+           px=10, py=10 is top-left in landscape */
+        sf3000_text_native(10, 10, msg, 0xFFFFFFFFu, page_y_offset);
     }
     
     // FPS Counter (Log to file every 5 seconds)
