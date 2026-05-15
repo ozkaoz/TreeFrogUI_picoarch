@@ -1,5 +1,6 @@
 #include <SDL/SDL.h>
 #include <unistd.h>
+#include <dlfcn.h>
 #include <math.h>
 #include "core.h"
 #include "libpicofe/fonts.h"
@@ -827,18 +828,65 @@ static void plat_sound_callback(void *unused, uint8_t *stream, int len)
 	}
 }
 
+#ifdef PLATFORM_SF3000
+static void *sf3000_sound_handle = NULL;
+static int (*sf3000_sound_driver_init)(void *device_name, int sample_rate, int channels) = NULL;
+static int (*sf3000_sound_driver_playframe)(const void *buffer, int bytes) = NULL;
+static int (*sf3000_sound_driver_deinit)(void) = NULL;
+#endif
+
 static void plat_sound_finish(void)
 {
+#ifdef PLATFORM_SF3000
+	if (sf3000_sound_driver_deinit) {
+		sf3000_sound_driver_deinit();
+	}
+	if (sf3000_sound_handle) {
+		dlclose(sf3000_sound_handle);
+		sf3000_sound_handle = NULL;
+	}
+#else
 	SDL_PauseAudio(1);
 	SDL_CloseAudio();
 	if (audio.buf) {
 		free(audio.buf);
 		audio.buf = NULL;
 	}
+#endif
 }
 
 static int plat_sound_init(void)
 {
+#ifdef PLATFORM_SF3000
+	if (!sf3000_sound_handle) {
+		sf3000_sound_handle = dlopen("/mnt/sdcard/cubegm/driver.so", RTLD_LAZY);
+		if (!sf3000_sound_handle) {
+			PA_ERROR("SF3000: Failed to load driver.so for audio: %s\n", dlerror());
+			return -1;
+		}
+
+		sf3000_sound_driver_init = dlsym(sf3000_sound_handle, "sound_driver_init");
+		sf3000_sound_driver_playframe = dlsym(sf3000_sound_handle, "sound_driver_playframe");
+		sf3000_sound_driver_deinit = dlsym(sf3000_sound_handle, "sound_driver_deinit");
+
+		if (!sf3000_sound_driver_init || !sf3000_sound_driver_playframe) {
+			PA_ERROR("SF3000: Missing audio driver functions in driver.so\n");
+			plat_sound_finish();
+			return -1;
+		}
+	}
+
+	if (sf3000_sound_driver_init(NULL, SAMPLE_RATE, 2) < 0) {
+		PA_ERROR("SF3000: sound_driver_init failed\n");
+		return -1;
+	}
+
+	audio.in_sample_rate = sample_rate;
+	audio.out_sample_rate = SAMPLE_RATE;
+	
+	PA_INFO("SF3000: Proprietary audio driver initialized at %d Hz\n", SAMPLE_RATE);
+	return 0;
+#else
 	if (SDL_InitSubSystem(SDL_INIT_AUDIO)) {
 		return -1;
 	}
@@ -862,10 +910,14 @@ static int plat_sound_init(void)
 
 	SDL_PauseAudio(0);
 	return 0;
+#endif
 }
 
 float plat_sound_capacity(void)
 {
+#ifdef PLATFORM_SF3000
+	return 1.0;
+#else
 	int buffered = 0;
 	if (audio.buf_len == 0)
 		return 1.0;
@@ -877,11 +929,17 @@ float plat_sound_capacity(void)
 	}
 
 	return 1.0 - (float)buffered / audio.buf_len;
+#endif
 }
 
 #define BATCH_SIZE 100
 void plat_sound_write(const struct audio_frame *data, int frames)
 {
+#ifdef PLATFORM_SF3000
+	if (sf3000_sound_driver_playframe) {
+		sf3000_sound_driver_playframe(data, frames);
+	}
+#else
 	int consumed = 0;
 	if (audio.buf_len == 0)
 		return;
@@ -911,9 +969,13 @@ void plat_sound_write(const struct audio_frame *data, int frames)
 		}
 	}
 	SDL_UnlockAudio();
+#endif
 }
 
 void plat_sound_resize_buffer(void) {
+#ifdef PLATFORM_SF3000
+	return;
+#else
 	size_t buf_size;
 	SDL_LockAudio();
 
@@ -941,6 +1003,7 @@ void plat_sound_resize_buffer(void) {
 	audio.buf_r = 0;
 	audio.max_buf_w = audio.buf_len - 1;
 	SDL_UnlockAudio();
+#endif
 }
 
 void plat_sdl_event_handler(void *event_)
@@ -1081,8 +1144,19 @@ int plat_init(void)
 
 int plat_reinit(void)
 {
+#ifdef PLATFORM_SF3000
+	if (sf3000_sound_driver_deinit) {
+		sf3000_sound_driver_deinit();
+	}
+	if (sf3000_sound_driver_init) {
+		sf3000_sound_driver_init(NULL, sample_rate, 2);
+	}
+	audio.in_sample_rate = sample_rate;
+	audio.out_sample_rate = sample_rate;
+#else
 	audio.in_sample_rate = sample_rate;
 	plat_sound_resize_buffer();
+#endif
 	scale_update_scaler();
 	return 0;
 }
