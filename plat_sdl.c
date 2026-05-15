@@ -1,5 +1,6 @@
 #include <SDL/SDL.h>
 #include <unistd.h>
+#include <sys/time.h>
 #include <dlfcn.h>
 #include <math.h>
 #include "core.h"
@@ -1458,22 +1459,24 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
         vi.xoffset = 0; vi.yoffset = page_y_offset;
         ioctl(sf3000_fb_fd, FBIOPAN_DISPLAY, &vi);
 
-#ifndef FBIO_WAITFORVSYNC
-#define FBIO_WAITFORVSYNC _IOW('F', 0x20, uint32_t)
-#endif
-        int arg = 0;
-        if (ioctl(sf3000_fb_fd, FBIO_WAITFORVSYNC, &arg) < 0) {
-            static unsigned int last_frame_time = 0;
-            unsigned int current_time = SDL_GetTicks();
-            if (last_frame_time != 0) {
-                unsigned int diff = current_time - last_frame_time;
-                if (diff < 16) {
-                    SDL_Delay(16 - diff);
-                    current_time = SDL_GetTicks();
+        static struct timeval last_tv = {0, 0};
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        if (last_tv.tv_sec != 0) {
+            long long diff_us = (tv.tv_sec - last_tv.tv_sec) * 1000000LL + (tv.tv_usec - last_tv.tv_usec);
+            if (diff_us > 0 && diff_us < 16666) {
+                long long sleep_us = 16666 - diff_us;
+                if (sleep_us > 2000) {
+                    usleep(sleep_us - 2000);
+                }
+                while (1) {
+                    gettimeofday(&tv, NULL);
+                    diff_us = (tv.tv_sec - last_tv.tv_sec) * 1000000LL + (tv.tv_usec - last_tv.tv_usec);
+                    if (diff_us >= 16666) break;
                 }
             }
-            last_frame_time = current_time;
         }
+        last_tv = tv;
     }
 }
 
