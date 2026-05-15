@@ -91,6 +91,7 @@ static size_t sf3000_fb_size = 0;
 int sf3000_fb_init(void);
 void sf3000_fb_blit(const void *src, int width, int height);
 void sf3000_fb_finish(void);
+static void sf3000_text_native(int px, int py, const char *text, uint32_t color, int page_y_offset);
 
 #endif
 
@@ -1128,7 +1129,7 @@ int sf3000_fb_init(void) {
     ioctl(sf3000_fb_fd, FBIOGET_VSCREENINFO, &sf3000_vinfo);
     ioctl(sf3000_fb_fd, FBIOGET_FSCREENINFO, &sf3000_finfo);
 
-    sf3000_fb_size = sf3000_finfo.line_length * sf3000_vinfo.yres;
+    sf3000_fb_size = sf3000_finfo.smem_len;
     sf3000_fb_mem = mmap(NULL, sf3000_fb_size, PROT_READ | PROT_WRITE, MAP_SHARED, sf3000_fb_fd, 0);
     if (sf3000_fb_mem == MAP_FAILED) {
         close(sf3000_fb_fd);
@@ -1166,10 +1167,20 @@ int sf3000_fb_init(void) {
     return 0;
 }
 
+static int sf3000_last_gh = -1;
+static int sf3000_current_page = 0;
+static uint32_t *sf3000_rotated_src = NULL;
+static int sf3000_rotated_capacity = 0;
+
+struct sf3000_blend_data {
+    uint16_t gy1, gy2;
+    uint8_t w1, w2;
+};
+static struct sf3000_blend_data sf3000_blend_lut[1024];
+
 void sf3000_fb_blit(const void *src, int width, int height) {
-    /* Re-assert display controller → fb0 page 0 every frame.
-       Virtual fb is 5120 lines (4 pages); something may flip yoffset
-       after init. This ioctl keeps display pointed at our page 0. */
+    /* Re-assert display controller → fb0 page.
+       Virtual fb is 5120 lines (4 pages). This ioctl keeps display pointed at our page. */
     {
         int dis = open("/dev/dis", O_RDWR);
         if (dis >= 0) {
@@ -1181,18 +1192,48 @@ void sf3000_fb_blit(const void *src, int width, int height) {
 
     if (!sf3000_fb_mem) return;
 
+
     int dst_stride = (int)(sf3000_finfo.line_length / 4);
-    /* Confirmed FB mapping (hardware-tested via calibration bars, 2025-05):
-         physical_x = fb_y * 854 / 1014   (visible fb_y 0..1013)
-         physical_y = (179-fb_x) * 8/3    (visible fb_x 0..179 → 480 physical px)
-       Derived: GREEN bar (fb_y=763) at ~75% px; BLUE (fb_y=1014) first off-screen. */
     const int FB_X_VIS = 180;
     const int FB_Y_TOT = 1014;   /* visible fb_y range: fb_y 0..1013 */
     const int PHYS_W   = 854;
     const int PHYS_H   = 480;
+    const int PAGE_Y_SIZE = 1280;
 
     const int gw = width, gh = height;
     const uint16_t *s = (const uint16_t *)src;
+
+    if (gw * gh > sf3000_rotated_capacity) {
+        if (sf3000_rotated_src) free(sf3000_rotated_src);
+        sf3000_rotated_capacity = gw * gh + 8192;
+        sf3000_rotated_src = malloc(sf3000_rotated_capacity * sizeof(uint32_t));
+    }
+
+    for (int gy = 0; gy < gh; gy++) {
+        const uint16_t *src_row = s + gy * gw;
+        for (int gx = 0; gx < gw; gx++) {
+            uint16_t color = src_row[gx];
+            uint32_t r = (color >> 11) & 0x1F; r = (r << 3) | (r >> 2);
+            uint32_t g = (color >>  5) & 0x3F; g = (g << 2) | (g >> 4);
+            uint32_t b = (color)       & 0x1F; b = (b << 3) | (b >> 2);
+            sf3000_rotated_src[gx * gh + gy] = 0xFF000000u | (r<<16) | (g<<8) | b;
+        }
+    }
+
+    if (gh != sf3000_last_gh) {
+        for (int fb_x = 0; fb_x < FB_X_VIS; fb_x++) {
+            // Center the sampling by adding 0.5 to fb_x (128 in fixed point 256)
+            int gy_fixed = ((FB_X_VIS - 1 - fb_x) * gh * 256) / FB_X_VIS;
+            int gy = gy_fixed >> 8;
+            int frac = gy_fixed & 0xFF;
+            
+            sf3000_blend_lut[fb_x].gy1 = gy;
+            sf3000_blend_lut[fb_x].gy2 = (gy + 1 < gh) ? (gy + 1) : gy;
+            sf3000_blend_lut[fb_x].w2 = frac >> 1; // 0..127
+            sf3000_blend_lut[fb_x].w1 = 128 - (frac >> 1);
+        }
+        sf3000_last_gh = gh;
+    }
 
     /* AR from core; fallback to pixel AR */
     double ar = (aspect_ratio > 0.1) ? aspect_ratio : (double)gw / gh;
@@ -1207,12 +1248,18 @@ void sf3000_fb_blit(const void *src, int width, int height) {
     static int last_fb_y_off = -1, last_fb_y_len = -1;
     int prev_gx = -1;
 
-    /* Clear full fb0 to black once on layout change */
+    /* Cycle between page 0 and page 1 for double buffering */
+    sf3000_current_page = (sf3000_current_page + 1) % 2;
+    int page_y_offset = sf3000_current_page * PAGE_Y_SIZE;
+
     if (fb_y_off != last_fb_y_off || fb_y_len != last_fb_y_len) {
-        int fb_h_full = (int)sf3000_vinfo.yres;  /* 1280 */
-        for (int fy = 0; fy < fb_h_full; fy++)
-            for (int fx = 0; fx < FB_X_VIS; fx++)
-                sf3000_fb_mem[fy * dst_stride + fx] = 0xFF000000u;
+        for (int p = 0; p < 2; p++) {
+            for (int fy = 0; fy < PAGE_Y_SIZE; fy++) {
+                for (int fx = 0; fx < FB_X_VIS; fx++) {
+                    sf3000_fb_mem[(p * PAGE_Y_SIZE + fy) * dst_stride + fx] = 0xFF000000u;
+                }
+            }
+        }
         last_fb_y_off = fb_y_off;
         last_fb_y_len = fb_y_len;
     }
@@ -1220,25 +1267,46 @@ void sf3000_fb_blit(const void *src, int width, int height) {
     for (int fb_y = fb_y_off; fb_y < fb_y_off + fb_y_len; fb_y++) {
         int gx = (fb_y - fb_y_off) * gw / fb_y_len;
         if (gx != prev_gx) {
-            /* Iterate gy (source rows) not fb_x — ensures ALL gh rows are
-               sampled. With gh=224 > FB_X_VIS=180 the old loop skipped ~44
-               rows; iterating gy gives nearest-neighbour correctness. */
-            for (int gy = 0; gy < gh; gy++) {
-                int fb_x = (FB_X_VIS - 1) - gy * FB_X_VIS / gh;
-                if (fb_x < 0 || fb_x >= FB_X_VIS) continue;
-                uint16_t p = s[gy * gw + gx];
-                uint32_t r = (p >> 11) & 0x1F; r = (r << 3) | (r >> 2);
-                uint32_t g = (p >>  5) & 0x3F; g = (g << 2) | (g >> 4);
-                uint32_t b = (p)       & 0x1F; b = (b << 3) | (b >> 2);
-                row_cache[fb_x] = 0xFF000000u | (r<<16) | (g<<8) | b;
+            uint32_t *src_row = sf3000_rotated_src + gx * gh;
+            for (int fb_x = 0; fb_x < FB_X_VIS; fb_x++) {
+                uint32_t c1 = src_row[sf3000_blend_lut[fb_x].gy1];
+                uint32_t c2 = src_row[sf3000_blend_lut[fb_x].gy2];
+                uint32_t w1 = sf3000_blend_lut[fb_x].w1;
+                uint32_t w2 = sf3000_blend_lut[fb_x].w2;
+
+                if (w2 == 0 || c1 == c2) {
+                    row_cache[fb_x] = c1;
+                } else {
+                    uint32_t rb = (((c1 & 0xFF00FF) * w1 + (c2 & 0xFF00FF) * w2) >> 7) & 0xFF00FF;
+                    uint32_t g  = (((c1 & 0x00FF00) * w1 + (c2 & 0x00FF00) * w2) >> 7) & 0x00FF00;
+                    row_cache[fb_x] = 0xFF000000u | rb | g;
+                }
             }
             prev_gx = gx;
         }
-        memcpy(sf3000_fb_mem + fb_y * dst_stride, row_cache, FB_X_VIS * 4);
+        memcpy(sf3000_fb_mem + (page_y_offset + fb_y) * dst_stride, row_cache, FB_X_VIS * 4);
     }
+    
+    // FPS Counter (Log to file every 5 seconds)
+    {
+        static int frames = 0;
+        static unsigned int last_time = 0;
+        unsigned int now = SDL_GetTicks();
+        frames++;
+        if (now - last_time >= 5000) {
+            FILE *f = fopen("/mnt/sdcard/cubegm/picoarch_fps.log", "a");
+            if (f) {
+                fprintf(f, "FPS: %.1f\n", (frames * 1000.0) / (now - last_time));
+                fclose(f);
+            }
+            frames = 0;
+            last_time = now;
+        }
+    }
+
     {
         struct fb_var_screeninfo vi = sf3000_vinfo;
-        vi.xoffset = 0; vi.yoffset = 0;
+        vi.xoffset = 0; vi.yoffset = page_y_offset;
         ioctl(sf3000_fb_fd, FBIOPAN_DISPLAY, &vi);
     }
 }
@@ -1249,7 +1317,7 @@ extern const int sf3000_keymap_count;
 /* Native text: writes fontdata8x8 glyphs directly to fb0.
    physical_x = fb_y * 854/1014, physical_y = (179-fb_x) * 8/3.
    2 fb_y per font column (squarifies pixels), 1 fb_x per row. */
-static void sf3000_text_native(int px, int py, const char *text, uint32_t color) {
+static void sf3000_text_native(int px, int py, const char *text, uint32_t color, int page_y_offset) {
     if (!sf3000_fb_mem) return;
     int dst_stride = (int)(sf3000_finfo.line_length / 4);
     int fb_y_base = px * 1014 / 854;
@@ -1262,8 +1330,8 @@ static void sf3000_text_native(int px, int py, const char *text, uint32_t color)
             if (fb_x < 0 || fb_x > 179) continue;
             for (int col = 0; col < 8; col++) {
                 if (fd & (0x80 >> col)) {
-                    int fy = fb_y_base + col * 2;
-                    if (fy >= 0 && fy < 1013) {
+                    int fy = fb_y_base + col * 2 + page_y_offset;
+                    if (fy >= page_y_offset && fy < page_y_offset + 1013) {
                         sf3000_fb_mem[fy * dst_stride + fb_x] = color;
                         sf3000_fb_mem[(fy+1) * dst_stride + fb_x] = color;
                     }
@@ -1282,7 +1350,7 @@ static void sf3000_show_frame_native(const char **lines, int nlines) {
             sf3000_fb_mem[fy * dst_stride + fx] = 0xFF000000u;
     int py = 10;
     for (int i = 0; i < nlines; i++) {
-        if (lines[i]) sf3000_text_native(20, py, lines[i], 0xFFFFFFFFu);
+        if (lines[i]) sf3000_text_native(20, py, lines[i], 0xFFFFFFFFu, 0);
         py += 30;
     }
     struct fb_var_screeninfo vi = sf3000_vinfo;
@@ -1378,6 +1446,11 @@ void sf3000_fb_finish(void) {
     if (sf3000_fb_fd >= 0) {
         close(sf3000_fb_fd);
         sf3000_fb_fd = -1;
+    }
+    if (sf3000_rotated_src) {
+        free(sf3000_rotated_src);
+        sf3000_rotated_src = NULL;
+        sf3000_rotated_capacity = 0;
     }
 }
 
