@@ -1253,7 +1253,7 @@ static uint16_t *sf3000_rotated_src = NULL;
 static int sf3000_rotated_capacity = 0;
 
 struct sf3000_blend_data {
-    uint16_t gy1, gy2;
+    int16_t gy1, gy2;
     uint8_t w1, w2;
 };
 static struct sf3000_blend_data sf3000_blend_lut[1024];
@@ -1303,40 +1303,58 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
         }
     }
 
-    if (gh != sf3000_last_gh) {
-        for (int fb_x = 0; fb_x < FB_X_VIS; fb_x++) {
-            // Center the sampling by adding 0.5 to fb_x (128 in fixed point 256)
-            int gy_fixed = ((FB_X_VIS - 1 - fb_x) * gh * 256) / FB_X_VIS;
-            int gy = gy_fixed >> 8;
-            int frac = gy_fixed & 0xFF;
-            
-            sf3000_blend_lut[fb_x].gy1 = gy;
-            sf3000_blend_lut[fb_x].gy2 = (gy + 1 < gh) ? (gy + 1) : gy;
-            sf3000_blend_lut[fb_x].w2 = frac >> 1; // 0..127
-            sf3000_blend_lut[fb_x].w1 = 128 - (frac >> 1);
-        }
-        sf3000_last_gh = gh;
-    }
-
     int current_scale = scale_size;
     if (src == screen->pixels) {
         current_scale = SCALE_SIZE_ASPECT; /* Force menu to not stretch */
     }
 
     int disp_w = PHYS_W;
+    int disp_h = PHYS_H;
+    
     if (current_scale == SCALE_SIZE_ASPECT) {
         double ar = (aspect_ratio > 0.1) ? aspect_ratio : (double)gw / gh;
         disp_w = (int)(PHYS_H * ar + 0.5);
     } else if (current_scale == SCALE_SIZE_NONE) {
-        /* Native pixels, roughly centered.
-           Since gh is scaled to PHYS_H, we scale gw accordingly. */
-        disp_w = (int)(PHYS_H * ((double)gw / gh) + 0.5);
-        /* If user REALLY wants no scaling, we'd need to change gh mapping too.
-           For now, let's just support FULL and ASPECT properly. */
+        /* Integer scaling */
+        int scale_x = PHYS_W / gw;
+        int scale_y = PHYS_H / gh;
+        int scale = (scale_x < scale_y) ? scale_x : scale_y;
+        if (scale < 1) scale = 1;
+        disp_w = gw * scale;
+        disp_h = gh * scale;
     }
     
     if (disp_w > PHYS_W) disp_w = PHYS_W;
-    if (current_scale == SCALE_SIZE_FULL) disp_w = PHYS_W;
+    if (disp_h > PHYS_H) disp_h = PHYS_H;
+    if (current_scale == SCALE_SIZE_FULL) {
+        disp_w = PHYS_W;
+        disp_h = PHYS_H;
+    }
+
+    static int sf3000_last_disp_h = -1;
+    if (gh != sf3000_last_gh || disp_h != sf3000_last_disp_h) {
+        int fb_x_len = disp_h * FB_X_VIS / PHYS_H;
+        int fb_x_off = (FB_X_VIS - fb_x_len) / 2;
+
+        for (int fb_x = 0; fb_x < FB_X_VIS; fb_x++) {
+            if (fb_x < fb_x_off || fb_x >= fb_x_off + fb_x_len) {
+                sf3000_blend_lut[fb_x].gy1 = -1; // Black border
+                sf3000_blend_lut[fb_x].w2 = 0;
+            } else {
+                int active_x = fb_x - fb_x_off;
+                int gy_fixed = ((fb_x_len - 1 - active_x) * gh * 256) / fb_x_len;
+                int gy = gy_fixed >> 8;
+                int frac = gy_fixed & 0xFF;
+                
+                sf3000_blend_lut[fb_x].gy1 = gy;
+                sf3000_blend_lut[fb_x].gy2 = (gy + 1 < gh) ? (gy + 1) : gy;
+                sf3000_blend_lut[fb_x].w2 = frac >> 1; // 0..127
+                sf3000_blend_lut[fb_x].w1 = 128 - (frac >> 1);
+            }
+        }
+        sf3000_last_gh = gh;
+        sf3000_last_disp_h = disp_h;
+    }
 
     /* Convert physical width → fb_y units, then center */
     int fb_y_len = disp_w * FB_Y_TOT / PHYS_W;
@@ -1376,6 +1394,10 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
         uint16_t *src_col = sf3000_rotated_src + gx * gh;
         for (int fb_x = 0; fb_x < FB_X_VIS; fb_x++) {
             int gy1 = sf3000_blend_lut[fb_x].gy1;
+            if (gy1 < 0) {
+                row_cache[fb_x] = 0xFF000000u;
+                continue;
+            }
             int gy2 = sf3000_blend_lut[fb_x].gy2;
             uint32_t w1 = sf3000_blend_lut[fb_x].w1;
             uint32_t w2 = sf3000_blend_lut[fb_x].w2;
@@ -1435,6 +1457,23 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
         struct fb_var_screeninfo vi = sf3000_vinfo;
         vi.xoffset = 0; vi.yoffset = page_y_offset;
         ioctl(sf3000_fb_fd, FBIOPAN_DISPLAY, &vi);
+
+#ifndef FBIO_WAITFORVSYNC
+#define FBIO_WAITFORVSYNC _IOW('F', 0x20, uint32_t)
+#endif
+        int arg = 0;
+        if (ioctl(sf3000_fb_fd, FBIO_WAITFORVSYNC, &arg) < 0) {
+            static unsigned int last_frame_time = 0;
+            unsigned int current_time = SDL_GetTicks();
+            if (last_frame_time != 0) {
+                unsigned int diff = current_time - last_frame_time;
+                if (diff < 16) {
+                    SDL_Delay(16 - diff);
+                    current_time = SDL_GetTicks();
+                }
+            }
+            last_frame_time = current_time;
+        }
     }
 }
 
@@ -1447,25 +1486,58 @@ extern const int sf3000_keymap_count;
 static void sf3000_text_native(int px, int py, const char *text, uint32_t color, int page_y_offset) {
     if (!sf3000_fb_mem) return;
     int dst_stride = (int)(sf3000_finfo.line_length / 4);
-    int fb_y_base = px * 1014 / 854;
+    
+    int text_scale = 2; // 2x scale for readability
+    int bg_padding = 4;
+    
+    int len = 0; while(text[len]) len++;
+    int box_w_px = len * 8 * text_scale + bg_padding * 2;
+    int box_h_px = 8 * text_scale + bg_padding * 2;
+    
+    // Draw solid black background
+    for (int box_y = 0; box_y < box_h_px; box_y++) {
+        int current_py = py + box_y;
+        int fb_x = 179 - (current_py * 180 / 480);
+        if (fb_x < 0 || fb_x > 179) continue;
+        
+        int fb_y_start = (px * 1014 / 854) + page_y_offset;
+        int fb_y_end = ((px + box_w_px) * 1014 / 854) + page_y_offset;
+        
+        for (int fy = fb_y_start; fy < fb_y_end; fy++) {
+            if (fy >= page_y_offset && fy < page_y_offset + 1280) {
+                sf3000_fb_mem[fy * dst_stride + fb_x] = 0xFF000000u; 
+            }
+        }
+    }
+    
+    // Draw scaled text
+    px += bg_padding;
+    py += bg_padding;
     for (int i = 0; text[i]; i++) {
         unsigned char c = (unsigned char)text[i];
         for (int row = 0; row < 8; row++) {
             unsigned char fd = fontdata8x8[c * 8 + row];
             if (!fd) continue;
-            int fb_x = 179 - (py + row) * 180 / 480;
-            if (fb_x < 0 || fb_x > 179) continue;
-            for (int col = 0; col < 8; col++) {
-                if (fd & (0x80 >> col)) {
-                    int fy = fb_y_base + col * 2 + page_y_offset;
-                    if (fy >= page_y_offset && fy < page_y_offset + 1013) {
-                        sf3000_fb_mem[fy * dst_stride + fb_x] = color;
-                        sf3000_fb_mem[(fy+1) * dst_stride + fb_x] = color;
+            
+            for (int sr = 0; sr < text_scale; sr++) {
+                int current_py = py + row * text_scale + sr;
+                int fb_x = 179 - (current_py * 180 / 480);
+                if (fb_x < 0 || fb_x > 179) continue;
+                
+                for (int col = 0; col < 8; col++) {
+                    if (fd & (0x80 >> col)) {
+                        int current_px = px + i * 8 * text_scale + col * text_scale;
+                        int fb_y_start = (current_px * 1014 / 854) + page_y_offset;
+                        int fb_y_end = ((current_px + text_scale) * 1014 / 854) + page_y_offset;
+                        for (int fy = fb_y_start; fy < fb_y_end; fy++) {
+                            if (fy >= page_y_offset && fy < page_y_offset + 1280) {
+                                sf3000_fb_mem[fy * dst_stride + fb_x] = color;
+                            }
+                        }
                     }
                 }
             }
         }
-        fb_y_base += 18;  /* 8 cols × 2 + 2 spacing */
     }
 }
 

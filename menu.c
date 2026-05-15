@@ -520,7 +520,7 @@ static const char h_optimize_text[]        =
 	"prioritize a consistent stroke size for\n"
 	"text. May affect non-text content.";
 
-static const char *men_scale_size[] = { "Native", "Aspect", "Full", NULL};
+static const char *men_scale_size[] = { "Integer", "Aspect", "Full", NULL};
 // static const char *men_scale_filter[] = { "Nearest", "Sharp", "Smooth", NULL};
 static const char *men_scale_effect[] = { "None", "DMG", "LCD", "Scanline", NULL};
 
