@@ -1424,7 +1424,14 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
         /* Blit the computed row `count` times to the framebuffer */
         uint32_t *dst = sf3000_fb_mem + (page_y_offset + fb_y) * dst_stride;
         for (int i = 0; i < count; i++) {
-            memcpy(dst, row_cache, FB_X_VIS * 4);
+            uint32_t *d = dst;
+            uint32_t *s = row_cache;
+            // Manually unroll the 180-word copy (18 iterations of 10)
+            // This aggressively bypasses generic libc memcpy overhead for uncached writes
+            for (int k = 0; k < 18; k++) {
+                *d++ = *s++; *d++ = *s++; *d++ = *s++; *d++ = *s++; *d++ = *s++;
+                *d++ = *s++; *d++ = *s++; *d++ = *s++; *d++ = *s++; *d++ = *s++;
+            }
             dst += dst_stride;
         }
         
