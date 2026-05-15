@@ -15,7 +15,7 @@ static struct dirent **corelist = NULL;
 static int corelist_len = 0;
 
 #define MENU_ALIGN_LEFT 0
-#define MENU_X2 1
+#define MENU_X2 0
 
 #define MENU_ITEMS_PER_PAGE 11
 

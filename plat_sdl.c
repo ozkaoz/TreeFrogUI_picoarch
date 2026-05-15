@@ -646,7 +646,12 @@ finish:
 void plat_video_menu_enter(int is_rom_loaded)
 {
 	SDL_LockSurface(screen);
+#ifdef PLATFORM_SF3000
+	memset(g_menubg_src_ptr, 0, g_menubg_src_h * g_menubg_src_pp * sizeof(uint16_t));
+	memset(screen->pixels, 0, screen->h * screen->pitch);
+#else
 	memcpy(g_menubg_src_ptr, screen->pixels, g_menubg_src_h * g_menubg_src_pp * sizeof(uint16_t));
+#endif
 	SDL_UnlockSurface(screen);
 	g_menuscreen_ptr = fb_flip();
 }
