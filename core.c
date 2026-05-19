@@ -289,7 +289,7 @@ static void set_directories(const char *core_name, const char *tag_name) {
 	// strncpy(config_dir, save_dir, MAX_PATH-1);
 	
 	snprintf(save_dir, MAX_PATH, "%s/Saves/%s/", sdcard_path, tag_name);
-	snprintf(system_dir, MAX_PATH, "%s/Bios/%s", sdcard_path, tag_name);
+	snprintf(system_dir, MAX_PATH, "%s/bios", sdcard_path);
 
 // #ifdef MINUI
 // 	strncpy(system_dir, save_dir, MAX_PATH-1);
