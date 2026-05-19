@@ -1445,23 +1445,6 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
         sf3000_text_native(10, 10, msg, 0xFFFFFFFFu, page_y_offset);
     }
     
-    // FPS Counter (Log to file every 5 seconds)
-    {
-        static int frames = 0;
-        static unsigned int last_time = 0;
-        unsigned int now = SDL_GetTicks();
-        frames++;
-        if (now - last_time >= 5000) {
-            FILE *f = fopen("/mnt/sdcard/cubegm/picoarch_fps.log", "a");
-            if (f) {
-                fprintf(f, "FPS: %.1f\n", (frames * 1000.0) / (now - last_time));
-                fclose(f);
-            }
-            frames = 0;
-            last_time = now;
-        }
-    }
-
     {
         struct fb_var_screeninfo vi = sf3000_vinfo;
         vi.xoffset = 0; vi.yoffset = page_y_offset;
