@@ -36,6 +36,7 @@ static char system_dir[MAX_PATH];
 static struct retro_disk_control_ext_callback disk_control_ext;
 
 static uint32_t buttons = 0;
+int current_pixel_format = RETRO_PIXEL_FORMAT_0RGB1555;
 
 static int core_load_game_info(struct content *content, struct retro_game_info *game_info) {
 	struct retro_system_info info = {};
@@ -362,7 +363,7 @@ static bool pa_environment(unsigned cmd, void *data) {
 		break;
 	}
 	case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT: { /* 10 */
-		/* accept all formats; plat_video_process handles conversion */
+		if (data) current_pixel_format = *(const enum retro_pixel_format *)data;
 		break;
 	}
 	case RETRO_ENVIRONMENT_SET_DISK_CONTROL_INTERFACE: { /* 13 */
@@ -488,6 +489,11 @@ static bool pa_environment(unsigned cmd, void *data) {
 			else
 				PA_WARN("Audio buffer change out of range (%d), ignored\n", frames);
 		}
+		break;
+	}
+	case RETRO_ENVIRONMENT_SHUTDOWN: { /* 7 */
+		extern bool should_quit;
+		should_quit = true;
 		break;
 	}
 	default:

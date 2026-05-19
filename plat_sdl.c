@@ -722,8 +722,9 @@ void plat_video_process(const void *data, unsigned width, unsigned height, size_
 	}
 
 #ifdef PLATFORM_SF3000
-	if (pitch == width * 2) {
-		/* RGB565: blit directly to fb0, bypass staging buffer entirely. */
+	extern int current_pixel_format;
+	if (current_pixel_format != RETRO_PIXEL_FORMAT_XRGB8888) {
+		/* RGB565 / 0RGB1555: blit directly to fb0 (pitch may be wider than width*2). */
 		g_game_w = (int)width; g_game_h = (int)height;
 		SDL_UnlockSurface(screen);
 		video_update_msg();
@@ -731,7 +732,7 @@ void plat_video_process(const void *data, unsigned width, unsigned height, size_
 		return;
 	}
 
-	if (pitch == width * 4) {
+	if (current_pixel_format == RETRO_PIXEL_FORMAT_XRGB8888) {
 		/* RGB8888 path: convert to 16-bit and blit. */
 		int x0 = ((int)SCREEN_WIDTH  - (int)width)  / 2;
 		int y0 = ((int)SCREEN_HEIGHT - (int)height) / 2;

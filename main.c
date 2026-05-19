@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <unistd.h>
 #include "core.h"
 #include "config.h"
 #include "content.h"
@@ -638,9 +639,34 @@ int main(int argc, char **argv) {
 	return quit(0);
 }
 
+#define FROGUI_CORE "/mnt/sdcard/cubegm/cores/frogui_libretro.so"
+#define PICOARCH_BIN "/mnt/sdcard/cubegm/picoarch"
+#define LAUNCH_FILE "/tmp/frogui_launch.txt"
+
 int quit(int code) {
 	menu_finish();
 	core_unload();
+
+#ifdef PLATFORM_SF3000
+	/* exec() BEFORE plat_finish() — keeps fb0 fd open so display stays
+	   connected across the exec boundary. Closing fb0 drops the /dev/dis
+	   connection and the next picoarch can't re-establish it. */
+	FILE *lf = fopen(LAUNCH_FILE, "r");
+	if (lf) {
+		char core_path[512], rom_path[512];
+		core_path[0] = rom_path[0] = '\0';
+		if (fgets(core_path, sizeof(core_path), lf)) core_path[strcspn(core_path, "\n")] = 0;
+		if (fgets(rom_path,  sizeof(rom_path),  lf)) rom_path[strcspn(rom_path,  "\n")] = 0;
+		fclose(lf);
+		unlink(LAUNCH_FILE);
+		if (core_path[0] && rom_path[0]) {
+			execl(PICOARCH_BIN, "picoarch", core_path, rom_path, NULL);
+		}
+	}
+	execl(PICOARCH_BIN, "picoarch", FROGUI_CORE, FROGUI_CORE, NULL);
+	/* execl failed — fall through to normal cleanup and exit */
+#endif
+
 	plat_finish();
 	exit(code);
 }
