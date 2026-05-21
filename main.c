@@ -652,13 +652,17 @@ int quit(int code) {
 	   connection and the next picoarch can't re-establish it. */
 	FILE *lf = fopen(LAUNCH_FILE, "r");
 	if (lf) {
-		char core_path[512], rom_path[512];
-		core_path[0] = rom_path[0] = '\0';
-		if (fgets(core_path, sizeof(core_path), lf)) core_path[strcspn(core_path, "\n")] = 0;
-		if (fgets(rom_path,  sizeof(rom_path),  lf)) rom_path[strcspn(rom_path,  "\n")] = 0;
+		char core_path[512], rom_path[512], standalone_rom[512];
+		core_path[0] = rom_path[0] = standalone_rom[0] = '\0';
+		if (fgets(core_path,      sizeof(core_path),      lf)) core_path[strcspn(core_path,           "\n")] = 0;
+		if (fgets(rom_path,       sizeof(rom_path),       lf)) rom_path[strcspn(rom_path,             "\n")] = 0;
+		if (fgets(standalone_rom, sizeof(standalone_rom), lf)) standalone_rom[strcspn(standalone_rom, "\n")] = 0;
 		fclose(lf);
 		unlink(LAUNCH_FILE);
-		if (core_path[0] && rom_path[0]) {
+		if (strcmp(core_path, "standalone") == 0 && rom_path[0]) {
+			chmod(rom_path, 0755);
+			execl(rom_path, rom_path, standalone_rom[0] ? standalone_rom : NULL, NULL);
+		} else if (core_path[0] && rom_path[0]) {
 			execl(PICOARCH_BIN, "picoarch", core_path, rom_path, NULL);
 		}
 	}
