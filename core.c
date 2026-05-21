@@ -281,15 +281,14 @@ static void set_directories(const char *core_name, const char *tag_name) {
 // #ifndef MINUI
 // 	char cwd[MAX_PATH];
 // #endif
-	if (home != NULL) {
-		snprintf(config_dir, MAX_PATH, "%s/.picoarch-%s-%s/", home, core_name, tag_name);
-		mkdir(config_dir, 0755);
-	}
+	const char *sd = "/mnt/sdcard/picoarch";
+	snprintf(config_dir, MAX_PATH, "%s/%s/", sd, tag_name);
+	mkdir("/mnt/sdcard/picoarch", 0755);
+	mkdir(config_dir, 0755);
 
-	// strncpy(config_dir, save_dir, MAX_PATH-1);
-	
-	snprintf(save_dir, MAX_PATH, "%s/Saves/%s/", sdcard_path, tag_name);
-	snprintf(system_dir, MAX_PATH, "%s/bios", sdcard_path);
+	snprintf(save_dir, MAX_PATH, "%s/%s/", sd, tag_name);
+	snprintf(system_dir, MAX_PATH, "/mnt/sdcard/cubegm/cores/.pcsx4all/bios");
+	(void)home; (void)sdcard_path;
 
 // #ifdef MINUI
 // 	strncpy(system_dir, save_dir, MAX_PATH-1);
