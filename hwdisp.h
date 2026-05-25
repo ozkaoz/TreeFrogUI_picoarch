@@ -35,6 +35,13 @@ void hwdisp_set_filter(int nearest);
  * HW scales+rotates+presents on physical panel automatically. */
 void hwdisp_present(const void *src, int w, int h, int pitch_bytes);
 
+/* Present with TRUE panel-integer nearest scaling.
+ * Internally: SW nearest-upscales src by N (largest integer where N*w<=854
+ * and N*h<=480), centers in an 854x480 black panel buffer, sends to driver
+ * with filter=0 (HW pass-through). Result: exact N:1 pixel ratio on panel,
+ * with letterbox/pillarbox black bars. */
+void hwdisp_present_integer(const void *src, int w, int h, int pitch_bytes);
+
 /* Cleanup. Safe to call even if init failed. */
 void hwdisp_deinit(void);
 

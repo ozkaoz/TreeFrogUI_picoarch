@@ -305,11 +305,100 @@ void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {
     p_disp(g_pad_buf, pad_w, h, pad_w * 2);
 }
 
+/* Panel-integer present: SW nearest-upscale src by largest integer N where
+ * N*w<=854 && N*h<=480, center result in 854x480 black panel buffer, send to
+ * driver with filter=0 (pass-through). True integer pixel ratio on panel. */
+#define PANEL_W 854
+#define PANEL_H 480
+#define PANEL_PITCH (PANEL_W * 2)
+
+static uint16_t *g_panel_buf = NULL;
+
+void hwdisp_present_integer(const void *src, int w, int h, int pitch_bytes) {
+    if (!g_active || !p_disp || !src) return;
+    if (w <= 0 || h <= 0) return;
+
+    if (!g_panel_buf) {
+        g_panel_buf = (uint16_t *)malloc(PANEL_W * PANEL_H * sizeof(uint16_t));
+        if (!g_panel_buf) return;
+        memset(g_panel_buf, 0, PANEL_W * PANEL_H * sizeof(uint16_t));
+    }
+
+    int sx = PANEL_W / w;
+    int sy = PANEL_H / h;
+    int n = sx < sy ? sx : sy;
+    if (n < 1) n = 1;
+    int dw = w * n, dh = h * n;
+    if (dw > PANEL_W) dw = PANEL_W;
+    if (dh > PANEL_H) dh = PANEL_H;
+    int ox = (PANEL_W - dw) / 2;
+    int oy = (PANEL_H - dh) / 2;
+
+    /* Clear borders only when geometry changes */
+    static int last_dw = -1, last_dh = -1;
+    if (dw != last_dw || dh != last_dh) {
+        memset(g_panel_buf, 0, PANEL_W * PANEL_H * sizeof(uint16_t));
+        last_dw = dw; last_dh = dh;
+    }
+
+    const int sp = pitch_bytes / 2;
+    const uint16_t *s = (const uint16_t *)src;
+
+    /* Row expand (one src row → n dst rows), per-pixel replicate. */
+    for (int srow_i = 0; srow_i < h; srow_i++) {
+        const uint16_t *srow = s + srow_i * sp;
+        uint16_t *drow = g_panel_buf + (size_t)(oy + srow_i * n) * PANEL_W + ox;
+
+        switch (n) {
+        case 1:
+            memcpy(drow, srow, (size_t)w * 2);
+            break;
+        case 2: {
+            uint32_t *d32 = (uint32_t *)drow;
+            for (int x = 0; x < w; x++) {
+                uint32_t p = srow[x];
+                d32[x] = p | (p << 16);
+            }
+            break;
+        }
+        case 3:
+            for (int x = 0; x < w; x++) {
+                uint16_t p = srow[x];
+                drow[x*3] = drow[x*3+1] = drow[x*3+2] = p;
+            }
+            break;
+        case 4: {
+            uint32_t *d32 = (uint32_t *)drow;
+            for (int x = 0; x < w; x++) {
+                uint32_t p = srow[x];
+                uint32_t pp = p | (p << 16);
+                d32[x*2] = pp; d32[x*2+1] = pp;
+            }
+            break;
+        }
+        default:
+            for (int x = 0; x < w; x++) {
+                uint16_t p = srow[x];
+                uint16_t *dp = drow + x * n;
+                for (int k = 0; k < n; k++) dp[k] = p;
+            }
+            break;
+        }
+
+        /* Vertical replication: copy this row n-1 more times */
+        for (int v = 1; v < n; v++)
+            memcpy(drow + (size_t)v * PANEL_W, drow, (size_t)dw * 2);
+    }
+
+    p_disp(g_panel_buf, PANEL_W, PANEL_H, PANEL_PITCH);
+}
+
 void hwdisp_deinit(void) {
     if (!g_active) return;
     if (p_deinit) p_deinit();
     if (g_pad_buf) { free(g_pad_buf); g_pad_buf = NULL; g_pad_cap = 0; g_pad_w = 0; g_pad_h = 0; }
     if (g_near_buf) { free(g_near_buf); g_near_buf = NULL; }
+    if (g_panel_buf) { free(g_panel_buf); g_panel_buf = NULL; }
     if (g_handle) { dlclose(g_handle); g_handle = NULL; }
     p_init = NULL; p_deinit = NULL; p_disp = NULL;
     g_active = 0;

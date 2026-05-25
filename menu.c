@@ -40,6 +40,7 @@ typedef enum
 	MA_CTRL_EMU,
 	MA_VID_FX,
 	MA_VID_BLANK,
+	MA_VID_SCALE_SIZE,
 } menu_id;
 
 me_bind_action me_ctrl_actions[] =
@@ -522,13 +523,38 @@ static const char h_optimize_text[]        =
 
 static const char *men_scale_size[] = { "Integer", "Aspect", "Full", NULL};
 static const char *men_scale_filter[] = { "Nearest", "Bilinear", NULL};
+
+/* Custom name+cycle for screen size — hides "Integer" when filter=BILINEAR
+ * (HW path: SW-upscale to 854×480 panel buffer is too memory-heavy and lags
+ * at 60fps). User can still cycle Aspect/Full freely in that mode. */
+static const char *mgn_scale_size(int id, int *offs) {
+    (void)id; (void)offs;
+    switch (scale_size) {
+    case SCALE_SIZE_NONE:   return "Integer";
+    case SCALE_SIZE_ASPECT: return "Aspect";
+    case SCALE_SIZE_FULL:   return "Full";
+    default: return "?";
+    }
+}
+
+static int mh_scale_size(int id, int keys) {
+    (void)id;
+    int dir = (keys & (PBTN_RIGHT|PBTN_R)) ? 1 : -1;
+    int v = (int)scale_size + dir;
+    int skip_none = (scale_filter == SCALE_FILTER_BILINEAR);
+    if (skip_none && v == SCALE_SIZE_NONE) v += dir;
+    if (v < 0) v = SCALE_SIZE_FULL;
+    if (v > SCALE_SIZE_FULL) v = skip_none ? SCALE_SIZE_ASPECT : SCALE_SIZE_NONE;
+    scale_size = (enum scale_size)v;
+    return 0;
+}
 static const char *men_scale_effect[] = { "None", "DMG", "LCD", "Scanline", NULL};
 
 static menu_entry e_menu_video_options[] =
 {
 	mee_onoff_h      ("Show FPS",                 0, show_fps, 1, h_show_fps),
 	mee_onoff_h      ("Show CPU %",               0, show_cpu, 1, h_show_cpu),
-	mee_enum_h       ("Screen size",              0, scale_size, men_scale_size, h_scale_size),
+	mee_cust_s_h     ("Screen size", MA_VID_SCALE_SIZE, 1, mh_scale_size, mgn_scale_size, h_scale_size),
 	mee_enum_h       ("Filter",                   0, scale_filter, men_scale_filter, NULL),
 	// mee_range_h      ("Max upscale",              0, max_upscale, 1, 8, h_max_upscale),
 	mee_enum_h       ("Screen effect",    MA_VID_FX, scale_effect, men_scale_effect, h_scale_effect),
@@ -540,6 +566,8 @@ static menu_entry e_menu_video_options[] =
 
 	// only show effects on native scale
 static void menu_loop_video_prep(void) {
+	if (scale_filter == SCALE_FILTER_BILINEAR && scale_size == SCALE_SIZE_NONE)
+		scale_size = SCALE_SIZE_ASPECT;
 	me_enable(e_menu_video_options, MA_VID_FX, scale_size==SCALE_SIZE_NONE);
 	me_enable(e_menu_video_options, MA_VID_BLANK, scale_size!=SCALE_SIZE_NONE);
 }
