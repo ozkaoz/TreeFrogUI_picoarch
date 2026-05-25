@@ -659,29 +659,48 @@ int quit(int code) {
 	 * display controller is pointed at driver.so's buffer, not fb0.
 	 * video_driver_deinit restores fb0 so the next process can use it. */
 	extern int sf3000_use_hwdisp;
+	extern int  hwdisp_init(void);
 	extern void hwdisp_deinit(void);
-	if (sf3000_use_hwdisp) {
-		/* Marker tells the next picoarch process (FrogUI) that HCGE was
-		 * activated — fb0 routing won't be restored by ioctl alone, so the
-		 * new process must hwdisp_init early to re-establish display. */
-		FILE *m = fopen("/tmp/picoarch_hcge_was_active", "w");
-		if (m) fclose(m);
-	}
-	hwdisp_deinit();
 
+	/* Read launch.txt first to know the next process. */
+	int next_is_standalone = 0;
+	char core_path[512] = "", rom_path[512] = "", standalone_rom[512] = "";
 	FILE *lf = fopen(LAUNCH_FILE, "r");
 	if (lf) {
-		char core_path[512], rom_path[512], standalone_rom[512];
-		core_path[0] = rom_path[0] = standalone_rom[0] = '\0';
 		if (fgets(core_path,      sizeof(core_path),      lf)) core_path[strcspn(core_path,           "\n")] = 0;
 		if (fgets(rom_path,       sizeof(rom_path),       lf)) rom_path[strcspn(rom_path,             "\n")] = 0;
 		if (fgets(standalone_rom, sizeof(standalone_rom), lf)) standalone_rom[strcspn(standalone_rom, "\n")] = 0;
 		fclose(lf);
 		unlink(LAUNCH_FILE);
-		if (strcmp(core_path, "standalone") == 0 && rom_path[0]) {
+		next_is_standalone = (strcmp(core_path, "standalone") == 0 && rom_path[0]);
+	}
+
+	/* Marker tells the next picoarch+FrogUI process (after this exec or
+	 * after the standalone binary exits) that HCGE is/was active so it can
+	 * re-init display routing. Tagged with parent PID (icube) to detect
+	 * stale markers from prior boot sessions on devices with persistent /tmp.
+	 *
+	 * Standalone binaries (pcsx4all etc.) always use HCGE, so we mark
+	 * unconditionally for that exec path. */
+	if (sf3000_use_hwdisp || next_is_standalone) {
+		FILE *m = fopen("/tmp/picoarch_hcge_was_active", "w");
+		if (m) { fprintf(m, "%d", (int)getppid()); fclose(m); }
+	}
+
+	/* Deinit HCGE only on picoarch → picoarch transitions. For standalone,
+	 * the child manages its own HCGE init from scratch — touching it here
+	 * (init OR deinit) was observed to glitch pcsx4all's display. Plain exec
+	 * with no display work is what the standalone path expects. */
+	if (!next_is_standalone) {
+		hwdisp_deinit();
+	}
+	(void)hwdisp_init; /* silence unused-extern warning */
+
+	if (core_path[0] && rom_path[0]) {
+		if (next_is_standalone) {
 			chmod(rom_path, 0755);
 			execl(rom_path, rom_path, standalone_rom[0] ? standalone_rom : NULL, NULL);
-		} else if (core_path[0] && rom_path[0]) {
+		} else {
 			execl(PICOARCH_BIN, "picoarch", core_path, rom_path, NULL);
 		}
 	}

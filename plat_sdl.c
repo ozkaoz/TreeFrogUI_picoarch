@@ -1257,14 +1257,27 @@ int sf3000_fb_init(void) {
     /* WARM-BOOT exception: if the previous picoarch process left HCGE active
      * (game ran with bilinear hwdisp path), fb0 routing is locked through
      * HCGE and SW writes won't show. Re-init hwdisp now so FrogUI frames
-     * can present via video_driver_disp_frame. */
-    if (access("/tmp/picoarch_hcge_was_active", F_OK) == 0) {
-        unlink("/tmp/picoarch_hcge_was_active");
-        if (hwdisp_init() == 0) {
-            sf3000_use_hwdisp = 1;
-            fprintf(stderr, "sf3000_fb_init: hwdisp early-init (warm boot)\n");
-        } else {
-            fprintf(stderr, "sf3000_fb_init: hwdisp early-init FAILED\n");
+     * can present via video_driver_disp_frame.
+     * Marker contains parent PID (icube); ignore if /tmp persisted across
+     * reboot and marker is from a stale session. */
+    {
+        FILE *mf = fopen("/tmp/picoarch_hcge_was_active", "r");
+        if (mf) {
+            int marker_ppid = -1;
+            (void)!fscanf(mf, "%d", &marker_ppid);
+            fclose(mf);
+            unlink("/tmp/picoarch_hcge_was_active");
+            if (marker_ppid == (int)getppid()) {
+                if (hwdisp_init() == 0) {
+                    sf3000_use_hwdisp = 1;
+                    fprintf(stderr, "sf3000_fb_init: hwdisp early-init (warm boot)\n");
+                } else {
+                    fprintf(stderr, "sf3000_fb_init: hwdisp early-init FAILED\n");
+                }
+            } else {
+                fprintf(stderr, "sf3000_fb_init: stale marker (ppid %d != %d) — ignored\n",
+                        marker_ppid, (int)getppid());
+            }
         }
     }
     return 0;
