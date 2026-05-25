@@ -28,7 +28,7 @@ static const struct {
 	CE_NUM(audio_buffer_size),
 	CE_NUM(scale_size),
 	// CE_NUM(max_upscale),
-	// CE_NUM(scale_filter),
+	CE_NUM(scale_filter),
 	CE_NUM(scale_effect),
 	CE_NUM(optimize_text),
 };

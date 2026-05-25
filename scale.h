@@ -14,11 +14,10 @@ enum scale_size {
 	SCALE_SIZE_FULL,
 };
 
-// enum scale_filter {
-// 	SCALE_FILTER_NEAREST,
-// 	SCALE_FILTER_SHARP,
-// 	SCALE_FILTER_SMOOTH,
-// };
+enum scale_filter {
+	SCALE_FILTER_NEAREST,
+	SCALE_FILTER_BILINEAR,
+};
 
 enum scale_effect {
 	SCALE_EFFECT_NONE,

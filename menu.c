@@ -521,7 +521,7 @@ static const char h_optimize_text[]        =
 	"text. May affect non-text content.";
 
 static const char *men_scale_size[] = { "Integer", "Aspect", "Full", NULL};
-// static const char *men_scale_filter[] = { "Nearest", "Sharp", "Smooth", NULL};
+static const char *men_scale_filter[] = { "Nearest", "Bilinear", NULL};
 static const char *men_scale_effect[] = { "None", "DMG", "LCD", "Scanline", NULL};
 
 static menu_entry e_menu_video_options[] =
@@ -529,7 +529,7 @@ static menu_entry e_menu_video_options[] =
 	mee_onoff_h      ("Show FPS",                 0, show_fps, 1, h_show_fps),
 	mee_onoff_h      ("Show CPU %",               0, show_cpu, 1, h_show_cpu),
 	mee_enum_h       ("Screen size",              0, scale_size, men_scale_size, h_scale_size),
-	// mee_enum_h       ("Filter",                   0, scale_filter, men_scale_filter, h_scale_filter),
+	mee_enum_h       ("Filter",                   0, scale_filter, men_scale_filter, NULL),
 	// mee_range_h      ("Max upscale",              0, max_upscale, 1, 8, h_max_upscale),
 	mee_enum_h       ("Screen effect",    MA_VID_FX, scale_effect, men_scale_effect, h_scale_effect),
 	mee_handler_id_h (             "", MA_VID_BLANK, NULL, NULL),

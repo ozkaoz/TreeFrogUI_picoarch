@@ -1280,6 +1280,63 @@ static inline uint32_t cvt565(uint16_t c) {
 
 void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
     if (sf3000_use_hwdisp) {
+        /* Aspect: menu always aspect, game follows scale_size. Panel is 16:9. */
+        int aspect = (src == screen->pixels) || (scale_size != SCALE_SIZE_FULL);
+        hwdisp_set_target_aspect(aspect ? 16 : 0, aspect ? 9 : 0);
+        hwdisp_set_filter(scale_filter == SCALE_FILTER_NEAREST ? 1 : 0);
+
+        /* FPS / overlay text: render into a copy of src (RGB565), since src
+         * itself is owned by the core and may be read-only. */
+        if (msg[0]) {
+            static uint16_t *compose_buf = NULL;
+            static int compose_cap = 0;
+            int need = width * height;
+            if (need > compose_cap) {
+                free(compose_buf);
+                compose_cap = need + 4096;
+                compose_buf = (uint16_t*)malloc(compose_cap * sizeof(uint16_t));
+            }
+            if (compose_buf) {
+                /* Copy src into compose_buf row-by-row (pitch may be wider). */
+                int sp = pitch / 2;
+                const uint16_t *s = (const uint16_t *)src;
+                for (int y = 0; y < height; y++)
+                    memcpy(compose_buf + (size_t)y * width, s + (size_t)y * sp, (size_t)width * 2);
+
+                /* Render msg at top-left using fontdata8x8 (2× scale). */
+                int len = 0; while (msg[len]) len++;
+                int tx = 4, ty = 4, ts = 2;
+                /* Background bar */
+                int bw = len * 8 * ts + 4;
+                int bh = 8 * ts + 4;
+                for (int by = 0; by < bh && (ty + by) < height; by++) {
+                    uint16_t *r = compose_buf + (size_t)(ty + by) * width + tx;
+                    int span = bw; if (tx + span > width) span = width - tx;
+                    for (int bx = 0; bx < span; bx++) r[bx] = 0;
+                }
+                /* Glyphs (white = 0xFFFF) */
+                for (int i = 0; i < len; i++) {
+                    unsigned char c = (unsigned char)msg[i];
+                    for (int row = 0; row < 8; row++) {
+                        unsigned char fd = fontdata8x8[c * 8 + row];
+                        if (!fd) continue;
+                        for (int sr = 0; sr < ts; sr++) {
+                            int py = ty + 2 + row * ts + sr;
+                            if (py >= height) break;
+                            uint16_t *r = compose_buf + (size_t)py * width;
+                            for (int col = 0; col < 8; col++) {
+                                if (!(fd & (0x80 >> col))) continue;
+                                int px = tx + 2 + i * 8 * ts + col * ts;
+                                for (int sc = 0; sc < ts && (px + sc) < width; sc++)
+                                    r[px + sc] = 0xFFFF;
+                            }
+                        }
+                    }
+                }
+                hwdisp_present(compose_buf, width, height, width * 2);
+                return;
+            }
+        }
         hwdisp_present(src, width, height, pitch);
         return;
     }
