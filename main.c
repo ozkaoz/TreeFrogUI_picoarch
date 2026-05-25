@@ -256,6 +256,8 @@ int save_config(int is_game)
 	config_write(config_file);
 	config_write_keys(config_file);
 
+	fflush(config_file);
+	fsync(fileno(config_file));
 	fclose(config_file);
 
 	if (is_game)
@@ -527,24 +529,29 @@ static void adjust_audio(void) {
 }
 
 static void get_tag_name(const char* in_path, char* out_tag) {
-	char* tmp;
-	strcpy(out_tag, in_path);
-	tmp = out_tag;
-	char roms_path[MAX_PATH];
-	sprintf(roms_path, "%s/Roms/", getenv("SDCARD_PATH"));
-	
-	// extract just the Roms folder name
-	tmp += strlen(roms_path) + 1;
-	char* tmp2 = strchr(tmp, '/');
-	if (tmp2) tmp2[0] = '\0';
+	char tmp[MAX_PATH];
+	char *slash, *paren;
 
-	// finally extract pak name from parenths if present
-	tmp = strchr(tmp, '(');
-	if (tmp) {
-		tmp += 1;
-		strcpy(out_tag, tmp);
-		tmp = strchr(out_tag,')');
-		tmp[0] = '\0';
+	strncpy(tmp, in_path, MAX_PATH - 1);
+	tmp[MAX_PATH - 1] = '\0';
+
+	/* strip filename: remove everything after last '/' */
+	slash = strrchr(tmp, '/');
+	if (slash) *slash = '\0';
+
+	/* parent dir name is the tag (e.g. "gb" from .../roms/gb/game.gbc) */
+	slash = strrchr(tmp, '/');
+	strncpy(out_tag, slash ? slash + 1 : tmp, MAX_PATH - 1);
+	out_tag[MAX_PATH - 1] = '\0';
+
+	/* extract pak name from parentheses if present: "PS1 (PCSX)" → "PCSX" */
+	paren = strchr(out_tag, '(');
+	if (paren) {
+		char *close = strchr(paren + 1, ')');
+		if (close) {
+			*close = '\0';
+			memmove(out_tag, paren + 1, strlen(paren + 1) + 1);
+		}
 	}
 }
 
@@ -647,9 +654,21 @@ int quit(int code) {
 	core_unload();
 
 #ifdef PLATFORM_SF3000
-	/* exec() BEFORE plat_finish() — keeps fb0 fd open so display stays
-	   connected across the exec boundary. Closing fb0 drops the /dev/dis
-	   connection and the next picoarch can't re-establish it. */
+	/* exec() BEFORE plat_finish() — keeps fb0/dis fds open across exec.
+	 * But first tear down HW display path: if hwdisp was active the
+	 * display controller is pointed at driver.so's buffer, not fb0.
+	 * video_driver_deinit restores fb0 so the next process can use it. */
+	extern int sf3000_use_hwdisp;
+	extern void hwdisp_deinit(void);
+	if (sf3000_use_hwdisp) {
+		/* Marker tells the next picoarch process (FrogUI) that HCGE was
+		 * activated — fb0 routing won't be restored by ioctl alone, so the
+		 * new process must hwdisp_init early to re-establish display. */
+		FILE *m = fopen("/tmp/picoarch_hcge_was_active", "w");
+		if (m) fclose(m);
+	}
+	hwdisp_deinit();
+
 	FILE *lf = fopen(LAUNCH_FILE, "r");
 	if (lf) {
 		char core_path[512], rom_path[512], standalone_rom[512];

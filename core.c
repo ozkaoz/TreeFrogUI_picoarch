@@ -82,9 +82,9 @@ void sram_write(void) {
 		PA_ERROR("Error writing SRAM data to file\n");
 	}
 
+	fflush(sram_file);
+	fsync(fileno(sram_file));
 	fclose(sram_file);
-
-	sync();
 }
 
 void sram_read(void) {
@@ -205,6 +205,10 @@ int state_write(void) {
 
 	plat_dump_screen(filename);
 
+	if (state_file) {
+		fflush(state_file);
+		fsync(fileno(state_file));
+	}
 	ret = 0;
 error:
 	if (state)
@@ -212,7 +216,6 @@ error:
 	if (state_file)
 		fclose(state_file);
 
-	sync();
 	return ret;
 }
 

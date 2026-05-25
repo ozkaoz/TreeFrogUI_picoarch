@@ -25,7 +25,7 @@ static SDL_Surface* screen;
 #include <sys/shm.h>
 #include "hwdisp.h"
 
-static int sf3000_use_hwdisp = 0;
+int sf3000_use_hwdisp = 0;
 
 /* cubevol shared memory: ftok("/tmp/joy_key", 'a') → 4-byte key state.
    Low 16 bits = button bitmask (bit set = pressed). */
@@ -1253,6 +1253,20 @@ int sf3000_fb_init(void) {
      * video_drivers_init at boot reroutes the display controller and
      * breaks SW direct-to-fb rendering. */
     sf3000_use_hwdisp = 0;
+
+    /* WARM-BOOT exception: if the previous picoarch process left HCGE active
+     * (game ran with bilinear hwdisp path), fb0 routing is locked through
+     * HCGE and SW writes won't show. Re-init hwdisp now so FrogUI frames
+     * can present via video_driver_disp_frame. */
+    if (access("/tmp/picoarch_hcge_was_active", F_OK) == 0) {
+        unlink("/tmp/picoarch_hcge_was_active");
+        if (hwdisp_init() == 0) {
+            sf3000_use_hwdisp = 1;
+            fprintf(stderr, "sf3000_fb_init: hwdisp early-init (warm boot)\n");
+        } else {
+            fprintf(stderr, "sf3000_fb_init: hwdisp early-init FAILED\n");
+        }
+    }
     return 0;
 }
 
@@ -1275,11 +1289,20 @@ static inline uint32_t cvt565(uint16_t c) {
 }
 
 void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
-    /* Lazy-init driver.so on first bilinear request — calling
-     * video_drivers_init reroutes the display controller and breaks SW
-     * direct-to-fb. So we only init on demand. Once HW path is live, we
-     * can't go back (driver controls display); filter then chooses HW
-     * bilinear vs SW-upscale-to-1280x720 (sharp but slow). */
+    /* FrogUI panel-size frame on warm boot: hwdisp was already inited by
+     * sf3000_fb_init via the marker file. Force HW bilinear pass-through
+     * (filter=0) — the only path proven safe with 854×480 input. Never use
+     * filter=1 (nearest SW-upscale) for panel-size input: confirmed to hard-
+     * crash the device with this driver. */
+    if (sf3000_use_hwdisp && src != screen->pixels &&
+        width == 854 && height == 480) {
+        hwdisp_set_filter(0);
+        hwdisp_set_target_aspect(0, 0);
+        hwdisp_present(src, width, height, pitch);
+        return;
+    }
+
+    /* Lazy-init hwdisp on first bilinear frame. */
     if (!sf3000_use_hwdisp && scale_filter == SCALE_FILTER_BILINEAR) {
         if (hwdisp_init() == 0) {
             sf3000_use_hwdisp = 1;
