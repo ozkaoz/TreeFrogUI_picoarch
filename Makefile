@@ -72,7 +72,7 @@ else ifeq ($(platform), miyoomini)
 	MMENU=1
 	PATCH=patch
 else ifeq ($(platform), sf3000)
-	OBJS += plat_sf3000.o
+	OBJS += plat_sf3000.o hwdisp.o
 	CFLAGS += -mips32r2 -march=mips32r2 -mtune=24kc -mfp32 -mhard-float -DCONTENT_DIR='"/mnt/SDCARD/Roms"' -DUSE_C_SCALER -DPLATFORM_SF3000
 	LDFLAGS += -mips32r2 -march=mips32r2 -mtune=24kc -mfp32 -mhard-float -lpthread
 	# Disable LTO — breaks MIPS ABICALLS GP setup for static function pointers passed to PIC code
@@ -134,6 +134,9 @@ plat_miyoomini.o: plat_sdl.c
 plat_trimui.o: plat_sdl.c
 plat_linux.o: plat_sdl.c
 plat_sf3000.o: plat_sdl.c
+
+hwdisp.o: hwdisp.c hwdisp.h
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(BIN): libpicofe/.patched $(OBJS)
 	$(CC) $(OBJS) $(LDFLAGS) -o $(BIN)

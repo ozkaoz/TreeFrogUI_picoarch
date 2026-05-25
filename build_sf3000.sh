@@ -22,7 +22,7 @@ rm -f libpicofe/input.o libpicofe/in_sdl.o libpicofe/linux/in_evdev.o \
       libpicofe/linux/plat.o libpicofe/fonts.o libpicofe/readpng.o \
       libpicofe/config_file.o cheat.o config.o content.o core.o menu.o \
       main.o options.o overrides.o patch.o scale.o scaler_neon.o \
-      unzip.o util.o plat_sf3000.o picoarch
+      unzip.o util.o plat_sf3000.o hwdisp.o picoarch
 
 # Build only the picoarch binary (not cores)
 # --sysroot tells the linker where to find -lSDL, -lpng12, -lz etc.

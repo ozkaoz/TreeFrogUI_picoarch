@@ -23,6 +23,9 @@ static SDL_Surface* screen;
 #include <linux/fb.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
+#include "hwdisp.h"
+
+static int sf3000_use_hwdisp = 0;
 
 /* cubevol shared memory: ftok("/tmp/joy_key", 'a') → 4-byte key state.
    Low 16 bits = button bitmask (bit set = pressed). */
@@ -1246,6 +1249,14 @@ int sf3000_fb_init(void) {
     for (size_t i = 0; i < sf3000_fb_size / 4; i++)
         sf3000_fb_mem[i] = 0xFF000000u;
 
+    /* HW display via driver.so. Falls back to SW path on failure (still functional). */
+    if (hwdisp_init() == 0) {
+        sf3000_use_hwdisp = 1;
+        fprintf(stderr, "sf3000_fb_init: HW path active\n");
+    } else {
+        sf3000_use_hwdisp = 0;
+        fprintf(stderr, "sf3000_fb_init: HW unavailable, using SW path\n");
+    }
     return 0;
 }
 
@@ -1268,6 +1279,10 @@ static inline uint32_t cvt565(uint16_t c) {
 }
 
 void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
+    if (sf3000_use_hwdisp) {
+        hwdisp_present(src, width, height, pitch);
+        return;
+    }
     /* Re-assert display controller → fb0 page.
        Virtual fb is 5120 lines (4 pages). This ioctl keeps display pointed at our page. */
     {
@@ -1632,6 +1647,10 @@ void sf3000_load_keymap(void) {
 }
 
 void sf3000_fb_finish(void) {
+    if (sf3000_use_hwdisp) {
+        hwdisp_deinit();
+        sf3000_use_hwdisp = 0;
+    }
     if (sf3000_fb_mem) {
         munmap(sf3000_fb_mem, sf3000_fb_size);
         sf3000_fb_mem = NULL;
