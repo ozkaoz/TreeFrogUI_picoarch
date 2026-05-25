@@ -1249,14 +1249,10 @@ int sf3000_fb_init(void) {
     for (size_t i = 0; i < sf3000_fb_size / 4; i++)
         sf3000_fb_mem[i] = 0xFF000000u;
 
-    /* HW display via driver.so. Falls back to SW path on failure (still functional). */
-    if (hwdisp_init() == 0) {
-        sf3000_use_hwdisp = 1;
-        fprintf(stderr, "sf3000_fb_init: HW path active\n");
-    } else {
-        sf3000_use_hwdisp = 0;
-        fprintf(stderr, "sf3000_fb_init: HW unavailable, using SW path\n");
-    }
+    /* Defer hwdisp_init until first bilinear blit — calling
+     * video_drivers_init at boot reroutes the display controller and
+     * breaks SW direct-to-fb rendering. */
+    sf3000_use_hwdisp = 0;
     return 0;
 }
 
@@ -1279,8 +1275,18 @@ static inline uint32_t cvt565(uint16_t c) {
 }
 
 void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
+    /* Lazy-init driver.so on first bilinear request — calling
+     * video_drivers_init reroutes the display controller and breaks SW
+     * direct-to-fb. So we only init on demand. Once HW path is live, we
+     * can't go back (driver controls display); filter then chooses HW
+     * bilinear vs SW-upscale-to-1280x720 (sharp but slow). */
+    if (!sf3000_use_hwdisp && scale_filter == SCALE_FILTER_BILINEAR) {
+        if (hwdisp_init() == 0) {
+            sf3000_use_hwdisp = 1;
+            fprintf(stderr, "sf3000_fb_blit: HW path active\n");
+        }
+    }
     if (sf3000_use_hwdisp) {
-        /* Aspect: menu always aspect, game follows scale_size. Panel is 16:9. */
         int aspect = (src == screen->pixels) || (scale_size != SCALE_SIZE_FULL);
         hwdisp_set_target_aspect(aspect ? 16 : 0, aspect ? 9 : 0);
         hwdisp_set_filter(scale_filter == SCALE_FILTER_NEAREST ? 1 : 0);
