@@ -4,6 +4,12 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+
+#define FROGUI_CORE "/mnt/sdcard/cubegm/cores/frogui_libretro.so"
+#define PICOARCH_BIN "/mnt/sdcard/cubegm/picoarch"
+#define LAUNCH_FILE "/tmp/frogui_launch.txt"
 #include "core.h"
 #include "config.h"
 #include "content.h"
@@ -213,6 +219,35 @@ int screenshot(void) {
 // 	return ret;
 }
 
+/* OSD overlay (battery, volume) is drawn by cubevol on /dev/fb1 (ARGB plane).
+ * Hide: mmap fb1, memset zeros (cubevol has no signal handler so it won't
+ *       redraw on its own — clear once is enough until next restart).
+ * Show: restart cubevol via killall + spawn; the new instance draws battery
+ *       and volume on init. cubevol shmem (/tmp/joy_key) is kernel-owned so
+ *       readers (game cores) survive the restart. */
+#include <sys/mman.h>
+#include <linux/fb.h>
+#include <stdlib.h>
+static int g_is_frogui = 0;
+static void fb1_clear(void) {
+	int fd = open("/dev/fb1", O_RDWR);
+	if (fd < 0) return;
+	struct fb_fix_screeninfo finfo;
+	if (ioctl(fd, FBIOGET_FSCREENINFO, &finfo) == 0 && finfo.smem_len > 0) {
+		void *mem = mmap(NULL, finfo.smem_len, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+		if (mem != MAP_FAILED) {
+			memset(mem, 0, finfo.smem_len);
+			munmap(mem, finfo.smem_len);
+		}
+	}
+	close(fd);
+}
+/* Only FrogUI restores OSD (via its own retro_init restart). picoarch's
+ * menu and game-resume keep fb1 cleared. */
+static void fb1_blank(int blank) { if (blank) fb1_clear(); }
+static void fb1_menu_enter(void) {}
+static void fb1_menu_exit(void)  {}
+
 void set_defaults(void)
 {
 	show_fps = 0;
@@ -370,7 +405,9 @@ void handle_emu_action(emu_action action)
 				disc_replace_index(0, disc_path);
 			} else if (status == kStatusOpenMenu) {
 				plat_video_flip();
+				fb1_menu_enter();
 				menu_loop();
+				fb1_menu_exit();
 			} else if (status >= kStatusLoadSlot) {
 				state_slot = status - kStatusLoadSlot;
 				state_read();
@@ -387,7 +424,9 @@ void handle_emu_action(emu_action action)
 		}
 		else {
 #endif
+			fb1_menu_enter();
 			menu_loop();
+			fb1_menu_exit();
 #ifdef MMENU
 		}
 #endif
@@ -621,6 +660,11 @@ int main(int argc, char **argv) {
 		quit(-1);
 	}
 
+	/* Hide cubevol's battery/volume OSD (/dev/fb1) during gameplay. Skipped
+	 * for FrogUI (the menu core) so the menu still shows battery. */
+	g_is_frogui = (strcmp(core_path, FROGUI_CORE) == 0);
+	if (!g_is_frogui) fb1_blank(1);
+
 	load_config_keys();
 
 #ifdef MMENU
@@ -645,13 +689,12 @@ int main(int argc, char **argv) {
 	return quit(0);
 }
 
-#define FROGUI_CORE "/mnt/sdcard/cubegm/cores/frogui_libretro.so"
-#define PICOARCH_BIN "/mnt/sdcard/cubegm/picoarch"
-#define LAUNCH_FILE "/tmp/frogui_launch.txt"
+/* moved to top of file */
 
 int quit(int code) {
 	menu_finish();
 	core_unload();
+	fb1_blank(0);   /* restore OSD overlay; next process re-blanks if needed */
 
 #ifdef PLATFORM_SF3000
 	/* exec() BEFORE plat_finish() — keeps fb0/dis fds open across exec.
