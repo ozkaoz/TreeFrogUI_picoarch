@@ -545,9 +545,9 @@ static void pa_input_poll(void) {
 		if ((raw & (SEL_BIT | START_BIT)) == (SEL_BIT | START_BIT))
 			handle_emu_action(EACTION_MENU);
 		else if ((raw & (SEL_BIT | L_BIT)) == (SEL_BIT | L_BIT))
-			handle_emu_action(EACTION_SAVE_STATE);
-		else if ((raw & (SEL_BIT | R_BIT)) == (SEL_BIT | R_BIT))
 			handle_emu_action(EACTION_LOAD_STATE);
+		else if ((raw & (SEL_BIT | R_BIT)) == (SEL_BIT | R_BIT))
+			handle_emu_action(EACTION_SAVE_STATE);
 
 		buttons = sf3000_keys_to_buttons(raw);
 	} else {
