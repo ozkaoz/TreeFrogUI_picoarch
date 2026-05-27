@@ -782,6 +782,14 @@ int quit(int code) {
 
 	fprintf(stderr, "DBG quit: use_hwdisp=%d next_standalone=%d core_path[0]=%d rom_path[0]=%d\n",
 	        sf3000_use_hwdisp, next_is_standalone, !!core_path[0], !!rom_path[0]);
+	/* WARM-BOOT marker: if we leave HCGE active, the next picoarch process
+	 * (same PPID = same icube shell child) early-inits hwdisp in
+	 * sf3000_fb_init so FrogUI doesn't try to SW-render onto a fb0 still
+	 * routed through driver.so (would squish). */
+	if (sf3000_use_hwdisp || next_is_standalone) {
+		FILE *m = fopen("/tmp/picoarch_hcge_was_active", "w");
+		if (m) { fprintf(m, "%d", (int)getppid()); fclose(m); }
+	}
 	if (!next_is_standalone) {
 		hwdisp_deinit();
 		fprintf(stderr, "DBG quit: hwdisp_deinit done\n");

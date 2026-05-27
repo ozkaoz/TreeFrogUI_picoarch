@@ -1370,6 +1370,29 @@ int sf3000_fb_init(void) {
         sf3000_fb_mem[i] = 0xFF000000u;
 
     sf3000_use_hwdisp = 0;
+
+    /* WARM-BOOT: previous picoarch left HCGE active (game in bilinear).
+     * Marker contains parent PID; we early-init hwdisp here so FrogUI
+     * frames present through driver.so instead of squishing on SW path. */
+    {
+        FILE *mf = fopen("/tmp/picoarch_hcge_was_active", "r");
+        if (mf) {
+            int marker_ppid = -1;
+            (void)!fscanf(mf, "%d", &marker_ppid);
+            fclose(mf);
+            unlink("/tmp/picoarch_hcge_was_active");
+            if (marker_ppid == (int)getppid()) {
+                extern int hwdisp_init(void);
+                if (hwdisp_init() == 0) {
+                    sf3000_use_hwdisp = 1;
+                    fprintf(stderr, "sf3000_fb_init: hwdisp early-init (warm boot)\n");
+                }
+            } else {
+                fprintf(stderr, "sf3000_fb_init: stale marker (ppid %d != %d) — ignored\n",
+                        marker_ppid, (int)getppid());
+            }
+        }
+    }
     return 0;
 }
 
@@ -1412,6 +1435,17 @@ static void sf3000_frame_limit(void) {
 }
 
 void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
+    /* WARM-BOOT: hwdisp pre-init'd by sf3000_fb_init via marker file.
+     * For FrogUI panel-size (854×480) frames, force HW bilinear pass-
+     * through — only path proven safe with panel-native input.  Cold-boot
+     * FrogUI takes SW path (no marker → use_hwdisp=0). */
+    if (sf3000_use_hwdisp && src != screen->pixels &&
+        width == 854 && height == 480) {
+        hwdisp_set_filter(0);
+        hwdisp_set_target_aspect(0, 0);
+        hwdisp_present(src, width, height, pitch);
+        return;
+    }
     /* Lazy-init hwdisp on first bilinear frame. */
     if (!sf3000_use_hwdisp && scale_filter == SCALE_FILTER_BILINEAR) {
         if (hwdisp_init() == 0) {
