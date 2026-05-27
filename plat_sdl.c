@@ -1212,6 +1212,29 @@ int sf3000_fb_init(void) {
     if (sf3000_fb_fd < 0) return -1;
 
     ioctl(sf3000_fb_fd, FBIOGET_VSCREENINFO, &sf3000_vinfo);
+    /* Always restore full geometry — yres_virtual may be wrong after HCGE even
+     * when xres/bpp look correct, causing FBIOPAN to silently fail for page 1. */
+    sf3000_vinfo.xres         = 720;
+    sf3000_vinfo.yres         = 1280;
+    sf3000_vinfo.xres_virtual = 720;
+    sf3000_vinfo.yres_virtual = 2560; /* 2 pages; fits in HCGE-leftover smem */
+    sf3000_vinfo.xoffset      = 0;
+    sf3000_vinfo.yoffset      = 0;
+    sf3000_vinfo.bits_per_pixel = 32;
+    sf3000_vinfo.red    = (struct fb_bitfield){16, 8, 0};
+    sf3000_vinfo.green  = (struct fb_bitfield){ 8, 8, 0};
+    sf3000_vinfo.blue   = (struct fb_bitfield){ 0, 8, 0};
+    sf3000_vinfo.transp = (struct fb_bitfield){24, 8, 0};
+    int r2 = ioctl(sf3000_fb_fd, FBIOPUT_VSCREENINFO, &sf3000_vinfo);
+    fprintf(stderr, "sf3000_fb_init: FBIOPUT ret=%d\n", r2);
+    /* FBIOPUT resets display crop — re-assert display→fb0 */
+    int dis2 = open("/dev/dis", O_RDWR);
+    if (dis2 >= 0) {
+        struct { int a, b, c; } buf2 = {1, 0, 0};
+        ioctl(dis2, 0xc00c0e0c, &buf2);
+        close(dis2);
+    }
+    ioctl(sf3000_fb_fd, FBIOGET_VSCREENINFO, &sf3000_vinfo);
     ioctl(sf3000_fb_fd, FBIOGET_FSCREENINFO, &sf3000_finfo);
 
     sf3000_fb_size = sf3000_finfo.smem_len;
@@ -1228,8 +1251,8 @@ int sf3000_fb_init(void) {
             sf3000_vinfo.bits_per_pixel,
             sf3000_finfo.line_length, sf3000_finfo.smem_len,
             (void *)sf3000_fb_mem);
-    fprintf(stderr, "SF3000 fb0: xoffset=%u yoffset=%u type=%u visual=%u\n",
-            sf3000_vinfo.xoffset, sf3000_vinfo.yoffset,
+    fprintf(stderr, "SF3000 fb0: xoffset=%u yoffset=%u rotate=%u type=%u visual=%u\n",
+            sf3000_vinfo.xoffset, sf3000_vinfo.yoffset, sf3000_vinfo.rotate,
             sf3000_finfo.type, sf3000_finfo.visual);
     fprintf(stderr, "SF3000 fb0: pixel r=%u/%u g=%u/%u b=%u/%u a=%u/%u\n",
             sf3000_vinfo.red.offset,   sf3000_vinfo.red.length,
@@ -1249,37 +1272,7 @@ int sf3000_fb_init(void) {
     for (size_t i = 0; i < sf3000_fb_size / 4; i++)
         sf3000_fb_mem[i] = 0xFF000000u;
 
-    /* Defer hwdisp_init until first bilinear blit — calling
-     * video_drivers_init at boot reroutes the display controller and
-     * breaks SW direct-to-fb rendering. */
     sf3000_use_hwdisp = 0;
-
-    /* WARM-BOOT exception: if the previous picoarch process left HCGE active
-     * (game ran with bilinear hwdisp path), fb0 routing is locked through
-     * HCGE and SW writes won't show. Re-init hwdisp now so FrogUI frames
-     * can present via video_driver_disp_frame.
-     * Marker contains parent PID (icube); ignore if /tmp persisted across
-     * reboot and marker is from a stale session. */
-    {
-        FILE *mf = fopen("/tmp/picoarch_hcge_was_active", "r");
-        if (mf) {
-            int marker_ppid = -1;
-            (void)!fscanf(mf, "%d", &marker_ppid);
-            fclose(mf);
-            unlink("/tmp/picoarch_hcge_was_active");
-            if (marker_ppid == (int)getppid()) {
-                if (hwdisp_init() == 0) {
-                    sf3000_use_hwdisp = 1;
-                    fprintf(stderr, "sf3000_fb_init: hwdisp early-init (warm boot)\n");
-                } else {
-                    fprintf(stderr, "sf3000_fb_init: hwdisp early-init FAILED\n");
-                }
-            } else {
-                fprintf(stderr, "sf3000_fb_init: stale marker (ppid %d != %d) — ignored\n",
-                        marker_ppid, (int)getppid());
-            }
-        }
-    }
     return 0;
 }
 
@@ -1301,31 +1294,42 @@ static inline uint32_t cvt565(uint16_t c) {
            (((c & 0x001F) << 3) | ((c & 0x001C) >> 2));
 }
 
-void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
-    /* FrogUI panel-size frame on warm boot: hwdisp was already inited by
-     * sf3000_fb_init via the marker file. Force HW bilinear pass-through
-     * (filter=0) — the only path proven safe with 854×480 input. Never use
-     * filter=1 (nearest SW-upscale) for panel-size input: confirmed to hard-
-     * crash the device with this driver. */
-    if (sf3000_use_hwdisp && src != screen->pixels &&
-        width == 854 && height == 480) {
-        hwdisp_set_filter(0);
-        hwdisp_set_target_aspect(0, 0);
-        hwdisp_present(src, width, height, pitch);
-        return;
+static void sf3000_frame_limit(void) {
+    static struct timeval last_tv = {0, 0};
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    if (last_tv.tv_sec != 0) {
+        long long diff_us = (tv.tv_sec - last_tv.tv_sec) * 1000000LL + (tv.tv_usec - last_tv.tv_usec);
+        if (diff_us > 0 && diff_us < 16666) {
+            long long sleep_us = 16666 - diff_us;
+            if (sleep_us > 2000)
+                usleep(sleep_us - 2000);
+            while (1) {
+                gettimeofday(&tv, NULL);
+                diff_us = (tv.tv_sec - last_tv.tv_sec) * 1000000LL + (tv.tv_usec - last_tv.tv_usec);
+                if (diff_us >= 16666) break;
+            }
+        }
     }
+    last_tv = tv;
+}
 
-    /* Lazy-init hwdisp on first bilinear frame. */
+void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
+    /* Lazy-init hwdisp on first game frame. FrogUI (854px wide) uses SW path
+     * until hwdisp is already active from a prior game frame. */
     if (!sf3000_use_hwdisp && scale_filter == SCALE_FILTER_BILINEAR) {
         if (hwdisp_init() == 0) {
             sf3000_use_hwdisp = 1;
             fprintf(stderr, "sf3000_fb_blit: HW path active\n");
         }
     }
-    if (sf3000_use_hwdisp) {
+
+
+if (sf3000_use_hwdisp) {
         int aspect = (src == screen->pixels) || (scale_size != SCALE_SIZE_FULL);
         hwdisp_set_target_aspect(aspect ? 16 : 0, aspect ? 9 : 0);
-        hwdisp_set_filter(scale_filter == SCALE_FILTER_NEAREST ? 1 : 0);
+        /* Never use nearest-upscale for panel-size (>=800px wide) input — crashes driver */
+        hwdisp_set_filter((scale_filter == SCALE_FILTER_NEAREST && width < 800) ? 1 : 0);
 
         /* FPS / overlay text: render into a copy of src (RGB565), since src
          * itself is owned by the core and may be read-only. */
@@ -1375,10 +1379,12 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
                         }
                     }
                 }
+                sf3000_frame_limit();
                 hwdisp_present(compose_buf, width, height, width * 2);
                 return;
             }
         }
+        sf3000_frame_limit();
         hwdisp_present(src, width, height, pitch);
         return;
     }
@@ -1762,6 +1768,41 @@ void sf3000_fb_finish(void) {
         free(sf3000_rotated_src);
         sf3000_rotated_src = NULL;
         sf3000_rotated_capacity = 0;
+    }
+}
+
+/* Restore fb0 to native portrait geometry (720x1280, 32bpp) using the existing
+ * open fd.  Called from quit() before execl so the new process inherits a clean
+ * display state.  Uses yres_virtual=2560 (2 pages) — safe when smem=11MB
+ * (HCGE leftover), avoids FBIOPUT rejection that would occur with 5120. */
+void sf3000_restore_fb0_geometry(void) {
+    if (sf3000_fb_fd < 0) return;
+    struct fb_var_screeninfo vinfo;
+    if (ioctl(sf3000_fb_fd, FBIOGET_VSCREENINFO, &vinfo) < 0) return;
+    fprintf(stderr, "sf3000_restore_fb0_geometry: before: %ux%u(v%u) bpp=%u rot=%u\n",
+            vinfo.xres, vinfo.yres, vinfo.yres_virtual, vinfo.bits_per_pixel, vinfo.rotate);
+    if (vinfo.bits_per_pixel == 32 && vinfo.xres == 720) {
+        fprintf(stderr, "sf3000_restore_fb0_geometry: already correct, skip\n");
+        return;
+    }
+    vinfo.xres = 720;
+    vinfo.yres = 1280;
+    vinfo.xres_virtual = 720;
+    vinfo.yres_virtual = 2560; /* 2 pages; fits in HCGE-leftover smem (~11MB) */
+    vinfo.xoffset = 0;
+    vinfo.yoffset = 0;
+    vinfo.bits_per_pixel = 32;
+    vinfo.red    = (struct fb_bitfield){16, 8, 0};
+    vinfo.green  = (struct fb_bitfield){ 8, 8, 0};
+    vinfo.blue   = (struct fb_bitfield){ 0, 8, 0};
+    vinfo.transp = (struct fb_bitfield){24, 8, 0};
+    int r = ioctl(sf3000_fb_fd, FBIOPUT_VSCREENINFO, &vinfo);
+    fprintf(stderr, "sf3000_restore_fb0_geometry: FBIOPUT ret=%d\n", r);
+    int dis = open("/dev/dis", O_RDWR);
+    if (dis >= 0) {
+        struct { int a, b, c; } buf = {1, 0, 0};
+        ioctl(dis, 0xc00c0e0c, &buf);
+        close(dis);
     }
 }
 

@@ -35,6 +35,7 @@ char core_name[MAX_PATH];
 int config_override = 0;
 static int last_screenshot = 0;
 int g_debug_frame = 0;
+static int g_filter_on_menu_enter = -1;
 
 static void sigsegv_handler(int sig) {
 	/* fprintf is not async-signal-safe; use write() directly */
@@ -245,8 +246,25 @@ static void fb1_clear(void) {
 /* Only FrogUI restores OSD (via its own retro_init restart). picoarch's
  * menu and game-resume keep fb1 cleared. */
 static void fb1_blank(int blank) { if (blank) fb1_clear(); }
-static void fb1_menu_enter(void) {}
-static void fb1_menu_exit(void)  {}
+static void fb1_menu_enter(void) {
+	if (g_is_frogui) return;
+	g_filter_on_menu_enter = scale_filter;
+}
+static void fb1_menu_exit(void) {
+	if (g_is_frogui) return;
+	if (g_filter_on_menu_enter >= 0 && scale_filter != g_filter_on_menu_enter) {
+		save_config(0);
+#ifdef PLATFORM_SF3000
+		/* Filter changed — restart via exec so new process owns a clean fb0. */
+		FILE *lf = fopen(LAUNCH_FILE, "w");
+		if (lf) {
+			fprintf(lf, "%s\n%s\n", core_path, content ? content->path : "");
+			fclose(lf);
+		}
+		should_quit = 1;
+#endif
+	}
+}
 
 void set_defaults(void)
 {
@@ -654,6 +672,12 @@ int main(int argc, char **argv) {
 
 	set_defaults();
 	load_config();
+#ifdef PLATFORM_SF3000
+	{
+		const char *pf = getenv("PICOARCH_FILTER");
+		if (pf) scale_filter = atoi(pf) ? SCALE_FILTER_BILINEAR : SCALE_FILTER_NEAREST;
+	}
+#endif
 	core_load();
 
 	if (core_load_content(content)) {
@@ -718,24 +742,11 @@ int quit(int code) {
 		next_is_standalone = (strcmp(core_path, "standalone") == 0 && rom_path[0]);
 	}
 
-	/* Marker tells the next picoarch+FrogUI process (after this exec or
-	 * after the standalone binary exits) that HCGE is/was active so it can
-	 * re-init display routing. Tagged with parent PID (icube) to detect
-	 * stale markers from prior boot sessions on devices with persistent /tmp.
-	 *
-	 * Standalone binaries (pcsx4all etc.) always use HCGE, so we mark
-	 * unconditionally for that exec path. */
-	if (sf3000_use_hwdisp || next_is_standalone) {
-		FILE *m = fopen("/tmp/picoarch_hcge_was_active", "w");
-		if (m) { fprintf(m, "%d", (int)getppid()); fclose(m); }
-	}
-
-	/* Deinit HCGE only on picoarch → picoarch transitions. For standalone,
-	 * the child manages its own HCGE init from scratch — touching it here
-	 * (init OR deinit) was observed to glitch pcsx4all's display. Plain exec
-	 * with no display work is what the standalone path expects. */
+	/* Deinit HCGE before exec to picoarch. Standalone manages its own init. */
 	if (!next_is_standalone) {
 		hwdisp_deinit();
+		/* Pass current filter to new process — overrides game-specific config. */
+		setenv("PICOARCH_FILTER", scale_filter == SCALE_FILTER_BILINEAR ? "1" : "0", 1);
 	}
 	(void)hwdisp_init; /* silence unused-extern warning */
 
