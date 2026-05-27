@@ -5,6 +5,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <sys/ioctl.h>
 
 #define FROGUI_CORE "/mnt/sdcard/cubegm/cores/frogui_libretro.so"
@@ -36,6 +37,33 @@ int config_override = 0;
 static int last_screenshot = 0;
 int g_debug_frame = 0;
 static int g_filter_on_menu_enter = -1;
+
+#ifdef PLATFORM_SF3000
+/* FrogUI owns the nearest/bilinear filter choice (single setting, applies to
+ * every game).  Picoarch reads /mnt/sdcard/frogui/settings.txt at startup and
+ * overrides scale_filter accordingly.  No in-game menu option to change. */
+#define FROGUI_SETTINGS_FILE "/mnt/sdcard/frogui/settings.txt"
+static void load_frogui_filter(void) {
+	FILE *f = fopen(FROGUI_SETTINGS_FILE, "r");
+	if (!f) { fprintf(stderr, "DBG load_frogui_filter: no settings file\n"); return; }
+	char line[256];
+	while (fgets(line, sizeof(line), f)) {
+		char *eq = strchr(line, '=');
+		if (!eq) continue;
+		*eq = '\0';
+		char *val = eq + 1;
+		char *nl = strchr(val, '\n'); if (nl) *nl = '\0';
+		char *cr = strchr(val, '\r'); if (cr) *cr = '\0';
+		if (strcmp(line, "filter") == 0) {
+			if (strcmp(val, "bilinear") == 0)      scale_filter = SCALE_FILTER_BILINEAR;
+			else if (strcmp(val, "nearest") == 0)  scale_filter = SCALE_FILTER_NEAREST;
+			fprintf(stderr, "DBG load_frogui_filter: filter=%s → scale_filter=%d\n",
+			        val, scale_filter);
+		}
+	}
+	fclose(f);
+}
+#endif
 
 static void sigsegv_handler(int sig) {
 	/* fprintf is not async-signal-safe; use write() directly */
@@ -248,22 +276,11 @@ static void fb1_clear(void) {
 static void fb1_blank(int blank) { if (blank) fb1_clear(); }
 static void fb1_menu_enter(void) {
 	if (g_is_frogui) return;
-	g_filter_on_menu_enter = scale_filter;
+	/* Filter is locked per-process (set from FrogUI settings at startup);
+	 * no need to track or react to filter changes mid-game. */
 }
 static void fb1_menu_exit(void) {
 	if (g_is_frogui) return;
-	if (g_filter_on_menu_enter >= 0 && scale_filter != g_filter_on_menu_enter) {
-		save_config(0);
-#ifdef PLATFORM_SF3000
-		/* Filter changed — restart via exec so new process owns a clean fb0. */
-		FILE *lf = fopen(LAUNCH_FILE, "w");
-		if (lf) {
-			fprintf(lf, "%s\n%s\n", core_path, content ? content->path : "");
-			fclose(lf);
-		}
-		should_quit = 1;
-#endif
-	}
 }
 
 void set_defaults(void)
@@ -300,9 +317,10 @@ int save_config(int is_game)
 	FILE *config_file;
 
 	config_file_name(config_filename, MAX_PATH, is_game);
+	fprintf(stderr, "DBG save_config(is_game=%d) → %s\n", is_game, config_filename);
 	config_file = fopen(config_filename, "wb");
 	if (!config_file) {
-		fprintf(stderr, "Could not write config to %s\n", config_filename);
+		fprintf(stderr, "Could not write config to %s (errno=%d)\n", config_filename, errno);
 		return -1;
 	}
 
@@ -312,6 +330,7 @@ int save_config(int is_game)
 	fflush(config_file);
 	fsync(fileno(config_file));
 	fclose(config_file);
+	fprintf(stderr, "DBG save_config: fclose done\n");
 
 	if (is_game)
 		config_override = 1;
@@ -326,12 +345,16 @@ static void alloc_config_buffer(char **config_ptr) {
 	config_override = 0;
 
 	config_file_name(config_filename, MAX_PATH, 1);
+	fprintf(stderr, "DBG alloc_config_buffer: try game-cfg=%s\n", config_filename);
 	config_file = fopen(config_filename, "rb");
 	if (config_file) {
 		config_override = 1;
+		fprintf(stderr, "DBG alloc_config_buffer: game-cfg HIT\n");
 	} else {
 		config_file_name(config_filename, MAX_PATH, 0);
+		fprintf(stderr, "DBG alloc_config_buffer: try global-cfg=%s\n", config_filename);
 		config_file = fopen(config_filename, "rb");
+		fprintf(stderr, "DBG alloc_config_buffer: global-cfg %s\n", config_file ? "HIT" : "MISS");
 	}
 
 	if (!config_file)
@@ -407,8 +430,16 @@ void handle_emu_action(emu_action action)
 	case EACTION_NONE:
 		break;
 	case EACTION_MENU:
+	{
+#ifdef PLATFORM_SF3000
+		extern int sf3000_use_hwdisp;
+		fprintf(stderr, "DBG EACTION_MENU: use_hwdisp=%d filter=%d\n",
+		        sf3000_use_hwdisp, scale_filter);
+#endif
 		toggle_fast_forward(1); /* Force FF off */
 		sram_write();
+		fprintf(stderr, "DBG EACTION_MENU: sram_write done\n");
+	}
 #ifdef MMENU
 		if (mmenu && content && content->path) {
 			ShowMenu_t ShowMenu = (ShowMenu_t)dlsym(mmenu, "ShowMenu");
@@ -443,7 +474,9 @@ void handle_emu_action(emu_action action)
 		else {
 #endif
 			fb1_menu_enter();
+			fprintf(stderr, "DBG menu_loop: ENTER\n");
 			menu_loop();
+			fprintf(stderr, "DBG menu_loop: EXIT\n");
 			fb1_menu_exit();
 #ifdef MMENU
 		}
@@ -672,11 +705,16 @@ int main(int argc, char **argv) {
 
 	set_defaults();
 	load_config();
+	fprintf(stderr, "DBG main: post-load_config scale_filter=%d scale_size=%d override=%d\n",
+	        scale_filter, scale_size, config_override);
 #ifdef PLATFORM_SF3000
-	{
-		const char *pf = getenv("PICOARCH_FILTER");
-		if (pf) scale_filter = atoi(pf) ? SCALE_FILTER_BILINEAR : SCALE_FILTER_NEAREST;
-	}
+	/* Apply FrogUI filter setting to games only.  FrogUI itself stays on the
+	 * SW path — driver.so hangs on 854×480 input on cold boot, and there's
+	 * no way to test/recover gracefully.  Trade-off: HW→FrogUI transition
+	 * may briefly show a squished frame until the SW path settles. */
+	if (strcmp(core_path, FROGUI_CORE) != 0)
+		load_frogui_filter();
+	fprintf(stderr, "DBG main: post-FrogUI-override scale_filter=%d\n", scale_filter);
 #endif
 	core_load();
 
@@ -742,14 +780,25 @@ int quit(int code) {
 		next_is_standalone = (strcmp(core_path, "standalone") == 0 && rom_path[0]);
 	}
 
+	fprintf(stderr, "DBG quit: use_hwdisp=%d next_standalone=%d core_path[0]=%d rom_path[0]=%d\n",
+	        sf3000_use_hwdisp, next_is_standalone, !!core_path[0], !!rom_path[0]);
 	/* Deinit HCGE before exec to picoarch. Standalone manages its own init. */
 	if (!next_is_standalone) {
 		hwdisp_deinit();
-		/* Pass current filter to new process — overrides game-specific config. */
-		setenv("PICOARCH_FILTER", scale_filter == SCALE_FILTER_BILINEAR ? "1" : "0", 1);
+		fprintf(stderr, "DBG quit: hwdisp_deinit done\n");
+		/* driver.so leaves fb0 in HCGE state — restore geometry + display
+		 * routing in this process so the next picoarch starts on a clean
+		 * fb0.  Required even though sf3000_fb_init also FBIOPUTs: without
+		 * this, FrogUI ends up squished/offset after a hwdisp session. */
+		extern void sf3000_restore_fb0_geometry(void);
+		sf3000_restore_fb0_geometry();
 	}
 	(void)hwdisp_init; /* silence unused-extern warning */
 
+	/* Flush page cache to SD before exec so logs/configs persist if user
+	 * power-cycles before next picoarch quits cleanly. */
+	sync();
+	fprintf(stderr, "DBG quit: sync done, exec\n");
 	if (core_path[0] && rom_path[0]) {
 		if (next_is_standalone) {
 			chmod(rom_path, 0755);

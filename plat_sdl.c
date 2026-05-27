@@ -18,6 +18,7 @@ static SDL_Surface* screen;
 // SF3000 raw framebuffer + input support
 #ifdef PLATFORM_SF3000
 #include <fcntl.h>
+#include <errno.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 #include <linux/fb.h>
@@ -1194,6 +1195,37 @@ void plat_finish(void)
 // SF3000 framebuffer implementation
 #ifdef PLATFORM_SF3000
 
+/* Phase-A diagnostic: dump state of fb0/fb6/fb22 at any moment so we can
+ * see which layers driver.so leaves enabled and whether display routing
+ * stays on fb0 or shifts to a HW layer. */
+void sf3000_dump_fb_state(const char *tag) {
+    const int devs[] = {0, 6, 22};
+    for (size_t i = 0; i < sizeof(devs)/sizeof(devs[0]); i++) {
+        char path[32];
+        snprintf(path, sizeof(path), "/dev/fb%d", devs[i]);
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) {
+            fprintf(stderr, "DBG dump[%s] %s: open failed (errno=%d)\n", tag, path, errno);
+            continue;
+        }
+        struct fb_var_screeninfo v;
+        struct fb_fix_screeninfo f;
+        if (ioctl(fd, FBIOGET_VSCREENINFO, &v) == 0 &&
+            ioctl(fd, FBIOGET_FSCREENINFO, &f) == 0) {
+            fprintf(stderr, "DBG dump[%s] %s: %ux%u(v%ux%u) bpp=%u off=%u,%u rot=%u "
+                            "line=%u smem_start=0x%lx smem_len=%u type=%u visual=%u\n",
+                    tag, path,
+                    v.xres, v.yres, v.xres_virtual, v.yres_virtual,
+                    v.bits_per_pixel, v.xoffset, v.yoffset, v.rotate,
+                    f.line_length, (unsigned long)f.smem_start, f.smem_len,
+                    f.type, f.visual);
+        } else {
+            fprintf(stderr, "DBG dump[%s] %s: ioctl failed (errno=%d)\n", tag, path, errno);
+        }
+        close(fd);
+    }
+}
+
 int sf3000_fb_init(void) {
     /* Wire display controller to fb0 — must happen AFTER SDL_Init so SDL
        can't reset this connection. Extracted from fbdev_init() disassembly. */
@@ -1212,8 +1244,15 @@ int sf3000_fb_init(void) {
     if (sf3000_fb_fd < 0) return -1;
 
     ioctl(sf3000_fb_fd, FBIOGET_VSCREENINFO, &sf3000_vinfo);
-    /* Always restore full geometry — yres_virtual may be wrong after HCGE even
-     * when xres/bpp look correct, causing FBIOPAN to silently fail for page 1. */
+    fprintf(stderr, "DBG sf3000_fb_init: PRE-FBIOPUT %ux%u(v%ux%u) bpp=%u off=%u,%u\n",
+            sf3000_vinfo.xres, sf3000_vinfo.yres,
+            sf3000_vinfo.xres_virtual, sf3000_vinfo.yres_virtual,
+            sf3000_vinfo.bits_per_pixel,
+            sf3000_vinfo.xoffset, sf3000_vinfo.yoffset);
+    /* Always FBIOPUT + re-assert /dev/dis.  Even when geometry looks correct
+     * after hwdisp_deinit, the display controller can still be in driver.so
+     * state.  Skipping FBIOPUT in that case → FrogUI shows squished/offset
+     * frames.  Cheap to run unconditionally; safe for every entry path. */
     sf3000_vinfo.xres         = 720;
     sf3000_vinfo.yres         = 1280;
     sf3000_vinfo.xres_virtual = 720;
@@ -1231,7 +1270,8 @@ int sf3000_fb_init(void) {
     int dis2 = open("/dev/dis", O_RDWR);
     if (dis2 >= 0) {
         struct { int a, b, c; } buf2 = {1, 0, 0};
-        ioctl(dis2, 0xc00c0e0c, &buf2);
+        int rr = ioctl(dis2, 0xc00c0e0c, &buf2);
+        fprintf(stderr, "DBG sf3000_fb_init: /dev/dis {1,0,0} ret=%d\n", rr);
         close(dis2);
     }
     ioctl(sf3000_fb_fd, FBIOGET_VSCREENINFO, &sf3000_vinfo);
@@ -1777,14 +1817,14 @@ void sf3000_fb_finish(void) {
  * (HCGE leftover), avoids FBIOPUT rejection that would occur with 5120. */
 void sf3000_restore_fb0_geometry(void) {
     if (sf3000_fb_fd < 0) return;
+    sf3000_dump_fb_state("restore/entry");
     struct fb_var_screeninfo vinfo;
     if (ioctl(sf3000_fb_fd, FBIOGET_VSCREENINFO, &vinfo) < 0) return;
     fprintf(stderr, "sf3000_restore_fb0_geometry: before: %ux%u(v%u) bpp=%u rot=%u\n",
             vinfo.xres, vinfo.yres, vinfo.yres_virtual, vinfo.bits_per_pixel, vinfo.rotate);
-    if (vinfo.bits_per_pixel == 32 && vinfo.xres == 720) {
-        fprintf(stderr, "sf3000_restore_fb0_geometry: already correct, skip\n");
-        return;
-    }
+    /* Always FBIOPUT — even when geometry looks correct, the display
+     * controller can still be routed to driver.so's buffer.  Pair with
+     * /dev/dis ioctl to re-route display→fb0. */
     vinfo.xres = 720;
     vinfo.yres = 1280;
     vinfo.xres_virtual = 720;
@@ -1798,12 +1838,19 @@ void sf3000_restore_fb0_geometry(void) {
     vinfo.transp = (struct fb_bitfield){24, 8, 0};
     int r = ioctl(sf3000_fb_fd, FBIOPUT_VSCREENINFO, &vinfo);
     fprintf(stderr, "sf3000_restore_fb0_geometry: FBIOPUT ret=%d\n", r);
+    /* Probe /dev/dis ioctl args — log all rets so we can see which combo
+     * actually re-routes the display to fb0 after HCGE. */
     int dis = open("/dev/dis", O_RDWR);
     if (dis >= 0) {
-        struct { int a, b, c; } buf = {1, 0, 0};
-        ioctl(dis, 0xc00c0e0c, &buf);
+        struct { int a, b, c; } b;
+        b = (typeof(b)){1, 0, 0}; fprintf(stderr, "DBG restore: /dev/dis {1,0,0} ret=%d\n", ioctl(dis, 0xc00c0e0c, &b));
+        b = (typeof(b)){0, 0, 0}; fprintf(stderr, "DBG restore: /dev/dis {0,0,0} ret=%d\n", ioctl(dis, 0xc00c0e0c, &b));
+        b = (typeof(b)){1, 1, 0}; fprintf(stderr, "DBG restore: /dev/dis {1,1,0} ret=%d\n", ioctl(dis, 0xc00c0e0c, &b));
+        b = (typeof(b)){2, 0, 0}; fprintf(stderr, "DBG restore: /dev/dis {2,0,0} ret=%d\n", ioctl(dis, 0xc00c0e0c, &b));
+        b = (typeof(b)){1, 0, 0}; fprintf(stderr, "DBG restore: /dev/dis {1,0,0}-final ret=%d\n", ioctl(dis, 0xc00c0e0c, &b));
         close(dis);
     }
+    sf3000_dump_fb_state("restore/post");
 }
 
 #endif // PLATFORM_SF3000

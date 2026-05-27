@@ -41,6 +41,7 @@ typedef enum
 	MA_VID_FX,
 	MA_VID_BLANK,
 	MA_VID_SCALE_SIZE,
+	MA_VID_FILTER,
 } menu_id;
 
 me_bind_action me_ctrl_actions[] =
@@ -555,7 +556,7 @@ static menu_entry e_menu_video_options[] =
 	mee_onoff_h      ("Show FPS",                 0, show_fps, 1, h_show_fps),
 	mee_onoff_h      ("Show CPU %",               0, show_cpu, 1, h_show_cpu),
 	mee_cust_s_h     ("Screen size", MA_VID_SCALE_SIZE, 1, mh_scale_size, mgn_scale_size, h_scale_size),
-	mee_enum_h       ("Filter",                   0, scale_filter, men_scale_filter, NULL),
+	mee_enum_h       ("Filter",        MA_VID_FILTER, scale_filter, men_scale_filter, NULL),
 	// mee_range_h      ("Max upscale",              0, max_upscale, 1, 8, h_max_upscale),
 	mee_enum_h       ("Screen effect",    MA_VID_FX, scale_effect, men_scale_effect, h_scale_effect),
 	mee_handler_id_h (             "", MA_VID_BLANK, NULL, NULL),
@@ -568,7 +569,12 @@ static menu_entry e_menu_video_options[] =
 static void menu_loop_video_prep(void) {
 	if (scale_filter == SCALE_FILTER_BILINEAR && scale_size == SCALE_SIZE_NONE)
 		scale_size = SCALE_SIZE_ASPECT;
-	me_enable(e_menu_video_options, MA_VID_FX, scale_size==SCALE_SIZE_NONE);
+	/* Filter is owned by FrogUI settings — hide from in-game menu. */
+	me_enable(e_menu_video_options, MA_VID_FILTER, false);
+	/* Screen size always visible; effects only meaningful in nearest. */
+	me_enable(e_menu_video_options, MA_VID_SCALE_SIZE, true);
+	me_enable(e_menu_video_options, MA_VID_FX,
+	          scale_filter == SCALE_FILTER_NEAREST && scale_size == SCALE_SIZE_NONE);
 	me_enable(e_menu_video_options, MA_VID_BLANK, scale_size!=SCALE_SIZE_NONE);
 }
 

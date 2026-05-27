@@ -46,7 +46,9 @@ static int g_aspect_den = 0;
 static int g_filter_nearest = 0;
 
 int hwdisp_init(void) {
+    extern void sf3000_dump_fb_state(const char *);
     if (g_active) return 0;
+    sf3000_dump_fb_state("hwdisp_init/pre");
 
     g_handle = dlopen("/mnt/sdcard/cubegm/driver.so", RTLD_NOW | RTLD_GLOBAL);
     if (!g_handle) {
@@ -74,6 +76,7 @@ int hwdisp_init(void) {
 
     g_active = 1;
     fprintf(stderr, "hwdisp: HW path active (init rv=%d)\n", rv);
+    sf3000_dump_fb_state("hwdisp_init/post");
     return 0;
 }
 
@@ -269,6 +272,10 @@ static void upscale_nearest(const void *src, int w, int h, int pitch_bytes) {
 }
 
 void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {
+    static int call_count = 0;
+    if (++call_count <= 5 || (call_count % 60) == 0)
+        fprintf(stderr, "DBG hwdisp_present #%d: src=%p %dx%d pitch=%d filt=%d\n",
+                call_count, src, w, h, pitch_bytes, g_filter_nearest);
     if (!g_active || !p_disp || !src) return;
 
     /* Nearest filter: SW upscale to 1280×720, driver does no further scale. */
@@ -394,12 +401,16 @@ void hwdisp_present_integer(const void *src, int w, int h, int pitch_bytes) {
 }
 
 void hwdisp_deinit(void) {
-    if (!g_active) return;
+    extern void sf3000_dump_fb_state(const char *);
+    if (!g_active) { fprintf(stderr, "DBG hwdisp_deinit: not active\n"); return; }
+    sf3000_dump_fb_state("hwdisp_deinit/pre");
     if (p_deinit) p_deinit();
+    sf3000_dump_fb_state("hwdisp_deinit/post-p_deinit");
     if (g_pad_buf) { free(g_pad_buf); g_pad_buf = NULL; g_pad_cap = 0; g_pad_w = 0; g_pad_h = 0; }
     if (g_near_buf) { free(g_near_buf); g_near_buf = NULL; }
     if (g_panel_buf) { free(g_panel_buf); g_panel_buf = NULL; }
     if (g_handle) { dlclose(g_handle); g_handle = NULL; }
     p_init = NULL; p_deinit = NULL; p_disp = NULL;
     g_active = 0;
+    sf3000_dump_fb_state("hwdisp_deinit/post-dlclose");
 }
