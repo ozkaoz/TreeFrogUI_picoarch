@@ -1,0 +1,35 @@
+#!/bin/bash
+set -e
+CROSS=/home/tomaszz/sf3000-work/sf3000toolchain/mipsel-buildroot-linux-gnu_sdk-buildroot/opt/ext-toolchain/bin/mips-mti-linux-gnu-
+SYSROOT=/home/tomaszz/sf3000-work/sf3000toolchain/mipsel-buildroot-linux-gnu_sdk-buildroot/mipsel-buildroot-linux-gnu/sysroot
+CC=${CROSS}gcc
+CFLAGS="-mips32r2 -march=mips32r2 -mtune=24kc -mfp32 -mhard-float -mlong-calls -EL"
+CFLAGS="$CFLAGS --sysroot=$SYSROOT"
+CFLAGS="$CFLAGS -Wall -fdata-sections -ffunction-sections"
+CFLAGS="$CFLAGS -I./ -I./libretro-common/include/"
+CFLAGS="$CFLAGS -I$SYSROOT/usr/include"
+CFLAGS="$CFLAGS -I$SYSROOT/usr/bin-o32/../../usr/include/SDL"
+CFLAGS="$CFLAGS -D_GNU_SOURCE=1 -D_REENTRANT"
+CFLAGS="$CFLAGS -DPICO_HOME_DIR='\"/.picoarch/\"'"
+CFLAGS="$CFLAGS -DCONTENT_DIR='\"/mnt/SDCARD/Roms\"'"
+CFLAGS="$CFLAGS -DUSE_C_SCALER -DPLATFORM_SF3000 -Ofast -DNDEBUG"
+
+LDFLAGS="$CFLAGS -L$SYSROOT/usr/lib -lc -ldl -lgcc -lm -lSDL -lpng12 -lz -Wl,--gc-sections -lpthread -s"
+
+OBJS="libpicofe/input.o libpicofe/in_sdl.o libpicofe/linux/in_evdev.o libpicofe/linux/plat.o libpicofe/fonts.o libpicofe/readpng.o libpicofe/config_file.o cheat.o config.o content.o core.o menu.o main.o options.o overrides.o patch.o scale.o scaler_neon.o unzip.o util.o plat_sf3000.o hwdisp.o"
+
+cd /home/tomaszz/sf3000-work/picoarch
+
+for src in libpicofe/input.c libpicofe/in_sdl.c libpicofe/linux/in_evdev.c libpicofe/linux/plat.c libpicofe/fonts.c libpicofe/readpng.c libpicofe/config_file.c cheat.c config.c content.c core.c menu.c main.c options.c overrides.c patch.c scale.c scaler_neon.c unzip.c util.c; do
+    obj="${src%.c}.o"
+    $CC $CFLAGS -c -o "$obj" "$src"
+done
+
+$CC $CFLAGS -c -o plat_sf3000.o plat_sf3000.c
+$CC $CFLAGS -c -o hwdisp.o hwdisp.c
+
+$CC $OBJS $LDFLAGS -o picoarch
+
+echo "=== BUILD SUCCESS ==="
+ls -la picoarch
+file picoarch
