@@ -708,10 +708,10 @@ int main(int argc, char **argv) {
 	fprintf(stderr, "DBG main: post-load_config scale_filter=%d scale_size=%d override=%d\n",
 	        scale_filter, scale_size, config_override);
 #ifdef PLATFORM_SF3000
-	/* Apply FrogUI filter setting to games only.  FrogUI itself stays on the
-	 * SW path — driver.so hangs on 854×480 input on cold boot, and there's
-	 * no way to test/recover gracefully.  Trade-off: HW→FrogUI transition
-	 * may briefly show a squished frame until the SW path settles. */
+	/* Filter applies to games only.  FrogUI stays SW — driver.so's first
+	 * p_disp hangs on cold boot for 854×480 input regardless of pre-init
+	 * (probed mmz/ge/dis open, double init/deinit, SW-warmup, dim fudge).
+	 * Accept HW→FrogUI exit squish as the known cost. */
 	if (strcmp(core_path, FROGUI_CORE) != 0)
 		load_frogui_filter();
 	fprintf(stderr, "DBG main: post-FrogUI-override scale_filter=%d\n", scale_filter);
@@ -782,23 +782,14 @@ int quit(int code) {
 
 	fprintf(stderr, "DBG quit: use_hwdisp=%d next_standalone=%d core_path[0]=%d rom_path[0]=%d\n",
 	        sf3000_use_hwdisp, next_is_standalone, !!core_path[0], !!rom_path[0]);
-	/* Deinit HCGE before exec to picoarch. Standalone manages its own init. */
 	if (!next_is_standalone) {
 		hwdisp_deinit();
 		fprintf(stderr, "DBG quit: hwdisp_deinit done\n");
-		/* driver.so leaves fb0 in HCGE state — restore geometry + display
-		 * routing in this process so the next picoarch starts on a clean
-		 * fb0.  Required even though sf3000_fb_init also FBIOPUTs: without
-		 * this, FrogUI ends up squished/offset after a hwdisp session. */
-		extern void sf3000_restore_fb0_geometry(void);
-		sf3000_restore_fb0_geometry();
 	}
-	(void)hwdisp_init; /* silence unused-extern warning */
-
-	/* Flush page cache to SD before exec so logs/configs persist if user
-	 * power-cycles before next picoarch quits cleanly. */
-	sync();
-	fprintf(stderr, "DBG quit: sync done, exec\n");
+	/* Keep fb0/dis fds open across exec — closing them breaks the panel
+	 * state recovery (was working in commit 6537239). */
+	fflush(stderr);
+	fsync(STDERR_FILENO);
 	if (core_path[0] && rom_path[0]) {
 		if (next_is_standalone) {
 			chmod(rom_path, 0755);

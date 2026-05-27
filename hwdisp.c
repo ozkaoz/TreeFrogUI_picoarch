@@ -272,12 +272,7 @@ static void upscale_nearest(const void *src, int w, int h, int pitch_bytes) {
 }
 
 void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {
-    static int call_count = 0;
-    if (++call_count <= 5 || (call_count % 60) == 0)
-        fprintf(stderr, "DBG hwdisp_present #%d: src=%p %dx%d pitch=%d filt=%d\n",
-                call_count, src, w, h, pitch_bytes, g_filter_nearest);
     if (!g_active || !p_disp || !src) return;
-
     /* Nearest filter: SW upscale to 1280×720, driver does no further scale. */
     if (g_filter_nearest) {
         if (!g_near_buf) {

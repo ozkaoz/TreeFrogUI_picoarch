@@ -1227,6 +1227,36 @@ void sf3000_dump_fb_state(const char *tag) {
 }
 
 int sf3000_fb_init(void) {
+    /* Write per-process init log to dedicated file with fsync, so it
+     * survives even when stderr buffer is lost on power-cycle. */
+    int initlog = open("/mnt/sdcard/picoarch_init.log",
+                       O_WRONLY|O_CREAT|O_APPEND, 0644);
+    if (initlog >= 0) {
+        dprintf(initlog, "\n=== picoarch init pid=%d ppid=%d ===\n",
+                getpid(), getppid());
+    }
+    /* Dump kernel-side fb/display info once on each startup so we can see
+     * what devices exist, what panel state the kernel reports, etc. */
+    {
+        const char *paths[] = {"/proc/fb", "/proc/iomem", "/proc/interrupts", NULL};
+        for (int i = 0; paths[i]; i++) {
+            FILE *pf = fopen(paths[i], "r");
+            if (!pf) { fprintf(stderr, "DBG %s: open failed\n", paths[i]); continue; }
+            char buf[512];
+            int line_count = 0;
+            while (fgets(buf, sizeof(buf), pf) && line_count++ < 40) {
+                size_t n = strlen(buf);
+                if (n && buf[n-1] == '\n') buf[n-1] = 0;
+                /* Only log lines that look relevant (fb / disp / panel / hcge). */
+                if (strstr(buf, "fb") || strstr(buf, "isp") ||
+                    strstr(buf, "anel") || strstr(buf, "cge") ||
+                    strstr(buf, "lcd") || strstr(buf, "/dev/fb") ||
+                    i == 0) /* /proc/fb is small, dump fully */
+                    fprintf(stderr, "DBG %s: %s\n", paths[i], buf);
+            }
+            fclose(pf);
+        }
+    }
     /* Wire display controller to fb0 — must happen AFTER SDL_Init so SDL
        can't reset this connection. Extracted from fbdev_init() disassembly. */
     int dis = open("/dev/dis", O_RDWR);
@@ -1249,6 +1279,14 @@ int sf3000_fb_init(void) {
             sf3000_vinfo.xres_virtual, sf3000_vinfo.yres_virtual,
             sf3000_vinfo.bits_per_pixel,
             sf3000_vinfo.xoffset, sf3000_vinfo.yoffset);
+    if (initlog >= 0) {
+        dprintf(initlog, "PRE-FBIOPUT %ux%u(v%ux%u) bpp=%u off=%u,%u rot=%u\n",
+                sf3000_vinfo.xres, sf3000_vinfo.yres,
+                sf3000_vinfo.xres_virtual, sf3000_vinfo.yres_virtual,
+                sf3000_vinfo.bits_per_pixel,
+                sf3000_vinfo.xoffset, sf3000_vinfo.yoffset,
+                sf3000_vinfo.rotate);
+    }
     /* Always FBIOPUT + re-assert /dev/dis.  Even when geometry looks correct
      * after hwdisp_deinit, the display controller can still be in driver.so
      * state.  Skipping FBIOPUT in that case → FrogUI shows squished/offset
@@ -1260,21 +1298,40 @@ int sf3000_fb_init(void) {
     sf3000_vinfo.xoffset      = 0;
     sf3000_vinfo.yoffset      = 0;
     sf3000_vinfo.bits_per_pixel = 32;
+    sf3000_vinfo.rotate       = 0;   /* force panel back to portrait */
     sf3000_vinfo.red    = (struct fb_bitfield){16, 8, 0};
     sf3000_vinfo.green  = (struct fb_bitfield){ 8, 8, 0};
     sf3000_vinfo.blue   = (struct fb_bitfield){ 0, 8, 0};
     sf3000_vinfo.transp = (struct fb_bitfield){24, 8, 0};
     int r2 = ioctl(sf3000_fb_fd, FBIOPUT_VSCREENINFO, &sf3000_vinfo);
     fprintf(stderr, "sf3000_fb_init: FBIOPUT ret=%d\n", r2);
-    /* FBIOPUT resets display crop — re-assert display→fb0 */
-    int dis2 = open("/dev/dis", O_RDWR);
-    if (dis2 >= 0) {
-        struct { int a, b, c; } buf2 = {1, 0, 0};
-        int rr = ioctl(dis2, 0xc00c0e0c, &buf2);
-        fprintf(stderr, "DBG sf3000_fb_init: /dev/dis {1,0,0} ret=%d\n", rr);
-        close(dis2);
-    }
+    if (initlog >= 0) dprintf(initlog, "FBIOPUT ret=%d errno=%d\n", r2, errno);
+    /* FBIOPUT sets metadata but does NOT pan; driver.so may have left
+     * yoffset at a large value (e.g. 3360) which keeps the display scanning
+     * out the wrong region (squished/offset frames).  Force pan to (0,0). */
+    sf3000_vinfo.xoffset = 0;
+    sf3000_vinfo.yoffset = 0;
+    int rp = ioctl(sf3000_fb_fd, FBIOPAN_DISPLAY, &sf3000_vinfo);
+    fprintf(stderr, "DBG sf3000_fb_init: FBIOPAN_DISPLAY(0,0) ret=%d\n", rp);
+    /* Match driver.so's fbdev_init blank sequence: BLANK_NORMAL then
+     * UNBLANK. Forces panel to re-latch geometry from FBIOPUT. */
+    int rb1 = ioctl(sf3000_fb_fd, FBIOBLANK, 1);
+    int rb2 = ioctl(sf3000_fb_fd, FBIOBLANK, 0);
+    fprintf(stderr, "DBG sf3000_fb_init: FBIOBLANK(1)=%d (0)=%d\n", rb1, rb2);
+    if (initlog >= 0)
+        dprintf(initlog, "FBIOBLANK(1)=%d (0)=%d errno=%d\n", rb1, rb2, errno);
     ioctl(sf3000_fb_fd, FBIOGET_VSCREENINFO, &sf3000_vinfo);
+    sf3000_dump_fb_state("fb_init/post");
+    if (initlog >= 0) {
+        dprintf(initlog, "POST-FBIOPUT %ux%u(v%ux%u) bpp=%u off=%u,%u rot=%u\n",
+                sf3000_vinfo.xres, sf3000_vinfo.yres,
+                sf3000_vinfo.xres_virtual, sf3000_vinfo.yres_virtual,
+                sf3000_vinfo.bits_per_pixel,
+                sf3000_vinfo.xoffset, sf3000_vinfo.yoffset,
+                sf3000_vinfo.rotate);
+        fsync(initlog);
+        close(initlog);
+    }
     ioctl(sf3000_fb_fd, FBIOGET_FSCREENINFO, &sf3000_finfo);
 
     sf3000_fb_size = sf3000_finfo.smem_len;
@@ -1355,8 +1412,7 @@ static void sf3000_frame_limit(void) {
 }
 
 void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
-    /* Lazy-init hwdisp on first game frame. FrogUI (854px wide) uses SW path
-     * until hwdisp is already active from a prior game frame. */
+    /* Lazy-init hwdisp on first bilinear frame. */
     if (!sf3000_use_hwdisp && scale_filter == SCALE_FILTER_BILINEAR) {
         if (hwdisp_init() == 0) {
             sf3000_use_hwdisp = 1;
