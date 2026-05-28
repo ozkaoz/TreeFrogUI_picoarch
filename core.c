@@ -118,9 +118,9 @@ bool state_allowed(void) {
 }
 
 void state_file_name(char *name, size_t size, int slot) {
-	char extension[5] = {0};
+	char extension[8] = {0};
 
-	snprintf(extension, 5, ".st%d", slot);
+	snprintf(extension, sizeof(extension), ".st%d", slot);
 	content_based_name(content, name, MAX_PATH, config_dir, NULL, extension);
 }
 
@@ -290,7 +290,8 @@ static void set_directories(const char *core_name, const char *tag_name) {
 	mkdir(config_dir, 0755);
 
 	snprintf(save_dir, MAX_PATH, "%s/%s/", sd, tag_name);
-	snprintf(system_dir, MAX_PATH, "/mnt/sdcard/cubegm/cores/.pcsx4all/bios");
+	snprintf(system_dir, MAX_PATH, "/mnt/sdcard/cubegm/bios");
+	mkdir("/mnt/sdcard/cubegm/bios", 0755);
 	(void)home; (void)sdcard_path;
 
 // #ifdef MINUI

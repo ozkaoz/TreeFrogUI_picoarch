@@ -12,9 +12,12 @@
 #include "hwdisp.h"
 
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <dlfcn.h>
+extern void dbg_log(const char *fmt, ...);
+#define DBG(...) dbg_log(__VA_ARGS__)
 
 #define HW_W   1280
 #define HW_H    720
@@ -397,7 +400,7 @@ void hwdisp_present_integer(const void *src, int w, int h, int pitch_bytes) {
 
 void hwdisp_deinit(void) {
     extern void sf3000_dump_fb_state(const char *);
-    if (!g_active) { fprintf(stderr, "DBG hwdisp_deinit: not active\n"); return; }
+    if (!g_active) { DBG("DBG hwdisp_deinit: not active\n"); return; }
     sf3000_dump_fb_state("hwdisp_deinit/pre");
     if (p_deinit) p_deinit();
     sf3000_dump_fb_state("hwdisp_deinit/post-p_deinit");

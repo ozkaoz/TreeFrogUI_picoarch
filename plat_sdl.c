@@ -6,6 +6,7 @@
 #include "core.h"
 #include "libpicofe/fonts.h"
 #include "libpicofe/plat.h"
+#include "main.h"
 #include "menu.h"
 #include "plat.h"
 #include "scale.h"
@@ -1205,14 +1206,14 @@ void sf3000_dump_fb_state(const char *tag) {
         snprintf(path, sizeof(path), "/dev/fb%d", devs[i]);
         int fd = open(path, O_RDONLY);
         if (fd < 0) {
-            fprintf(stderr, "DBG dump[%s] %s: open failed (errno=%d)\n", tag, path, errno);
+            DBG("DBG dump[%s] %s: open failed (errno=%d)\n", tag, path, errno);
             continue;
         }
         struct fb_var_screeninfo v;
         struct fb_fix_screeninfo f;
         if (ioctl(fd, FBIOGET_VSCREENINFO, &v) == 0 &&
             ioctl(fd, FBIOGET_FSCREENINFO, &f) == 0) {
-            fprintf(stderr, "DBG dump[%s] %s: %ux%u(v%ux%u) bpp=%u off=%u,%u rot=%u "
+            DBG("DBG dump[%s] %s: %ux%u(v%ux%u) bpp=%u off=%u,%u rot=%u "
                             "line=%u smem_start=0x%lx smem_len=%u type=%u visual=%u\n",
                     tag, path,
                     v.xres, v.yres, v.xres_virtual, v.yres_virtual,
@@ -1220,7 +1221,7 @@ void sf3000_dump_fb_state(const char *tag) {
                     f.line_length, (unsigned long)f.smem_start, f.smem_len,
                     f.type, f.visual);
         } else {
-            fprintf(stderr, "DBG dump[%s] %s: ioctl failed (errno=%d)\n", tag, path, errno);
+            DBG("DBG dump[%s] %s: ioctl failed (errno=%d)\n", tag, path, errno);
         }
         close(fd);
     }
@@ -1241,7 +1242,7 @@ int sf3000_fb_init(void) {
         const char *paths[] = {"/proc/fb", "/proc/iomem", "/proc/interrupts", NULL};
         for (int i = 0; paths[i]; i++) {
             FILE *pf = fopen(paths[i], "r");
-            if (!pf) { fprintf(stderr, "DBG %s: open failed\n", paths[i]); continue; }
+            if (!pf) { DBG("DBG %s: open failed\n", paths[i]); continue; }
             char buf[512];
             int line_count = 0;
             while (fgets(buf, sizeof(buf), pf) && line_count++ < 40) {
@@ -1252,7 +1253,7 @@ int sf3000_fb_init(void) {
                     strstr(buf, "anel") || strstr(buf, "cge") ||
                     strstr(buf, "lcd") || strstr(buf, "/dev/fb") ||
                     i == 0) /* /proc/fb is small, dump fully */
-                    fprintf(stderr, "DBG %s: %s\n", paths[i], buf);
+                    DBG("DBG %s: %s\n", paths[i], buf);
             }
             fclose(pf);
         }
@@ -1274,7 +1275,7 @@ int sf3000_fb_init(void) {
     if (sf3000_fb_fd < 0) return -1;
 
     ioctl(sf3000_fb_fd, FBIOGET_VSCREENINFO, &sf3000_vinfo);
-    fprintf(stderr, "DBG sf3000_fb_init: PRE-FBIOPUT %ux%u(v%ux%u) bpp=%u off=%u,%u\n",
+    DBG("DBG sf3000_fb_init: PRE-FBIOPUT %ux%u(v%ux%u) bpp=%u off=%u,%u\n",
             sf3000_vinfo.xres, sf3000_vinfo.yres,
             sf3000_vinfo.xres_virtual, sf3000_vinfo.yres_virtual,
             sf3000_vinfo.bits_per_pixel,
@@ -1312,12 +1313,12 @@ int sf3000_fb_init(void) {
     sf3000_vinfo.xoffset = 0;
     sf3000_vinfo.yoffset = 0;
     int rp = ioctl(sf3000_fb_fd, FBIOPAN_DISPLAY, &sf3000_vinfo);
-    fprintf(stderr, "DBG sf3000_fb_init: FBIOPAN_DISPLAY(0,0) ret=%d\n", rp);
+    DBG("DBG sf3000_fb_init: FBIOPAN_DISPLAY(0,0) ret=%d\n", rp);
     /* Match driver.so's fbdev_init blank sequence: BLANK_NORMAL then
      * UNBLANK. Forces panel to re-latch geometry from FBIOPUT. */
     int rb1 = ioctl(sf3000_fb_fd, FBIOBLANK, 1);
     int rb2 = ioctl(sf3000_fb_fd, FBIOBLANK, 0);
-    fprintf(stderr, "DBG sf3000_fb_init: FBIOBLANK(1)=%d (0)=%d\n", rb1, rb2);
+    DBG("DBG sf3000_fb_init: FBIOBLANK(1)=%d (0)=%d\n", rb1, rb2);
     if (initlog >= 0)
         dprintf(initlog, "FBIOBLANK(1)=%d (0)=%d errno=%d\n", rb1, rb2, errno);
     ioctl(sf3000_fb_fd, FBIOGET_VSCREENINFO, &sf3000_vinfo);
@@ -1933,11 +1934,11 @@ void sf3000_restore_fb0_geometry(void) {
     int dis = open("/dev/dis", O_RDWR);
     if (dis >= 0) {
         struct { int a, b, c; } b;
-        b = (typeof(b)){1, 0, 0}; fprintf(stderr, "DBG restore: /dev/dis {1,0,0} ret=%d\n", ioctl(dis, 0xc00c0e0c, &b));
-        b = (typeof(b)){0, 0, 0}; fprintf(stderr, "DBG restore: /dev/dis {0,0,0} ret=%d\n", ioctl(dis, 0xc00c0e0c, &b));
-        b = (typeof(b)){1, 1, 0}; fprintf(stderr, "DBG restore: /dev/dis {1,1,0} ret=%d\n", ioctl(dis, 0xc00c0e0c, &b));
-        b = (typeof(b)){2, 0, 0}; fprintf(stderr, "DBG restore: /dev/dis {2,0,0} ret=%d\n", ioctl(dis, 0xc00c0e0c, &b));
-        b = (typeof(b)){1, 0, 0}; fprintf(stderr, "DBG restore: /dev/dis {1,0,0}-final ret=%d\n", ioctl(dis, 0xc00c0e0c, &b));
+        b = (typeof(b)){1, 0, 0}; DBG("DBG restore: /dev/dis {1,0,0} ret=%d\n", ioctl(dis, 0xc00c0e0c, &b));
+        b = (typeof(b)){0, 0, 0}; DBG("DBG restore: /dev/dis {0,0,0} ret=%d\n", ioctl(dis, 0xc00c0e0c, &b));
+        b = (typeof(b)){1, 1, 0}; DBG("DBG restore: /dev/dis {1,1,0} ret=%d\n", ioctl(dis, 0xc00c0e0c, &b));
+        b = (typeof(b)){2, 0, 0}; DBG("DBG restore: /dev/dis {2,0,0} ret=%d\n", ioctl(dis, 0xc00c0e0c, &b));
+        b = (typeof(b)){1, 0, 0}; DBG("DBG restore: /dev/dis {1,0,0}-final ret=%d\n", ioctl(dis, 0xc00c0e0c, &b));
         close(dis);
     }
     sf3000_dump_fb_state("restore/post");

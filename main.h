@@ -34,6 +34,12 @@ extern char save_template_path[MAX_PATH];
 #define PA_DEBUG(...)
 #endif
 
+/* DBG(...) writes to stderr only when /mnt/sdcard/log.txt exists at startup.
+ * Create the file to enable logging; delete to silence.  Decision cached on
+ * first call. */
+void dbg_log(const char *fmt, ...);
+#define DBG(...) dbg_log(__VA_ARGS__)
+
 #define PA_INFO(...) pa_log(RETRO_LOG_INFO, __VA_ARGS__)
 #define PA_WARN(...) pa_log(RETRO_LOG_WARN, __VA_ARGS__)
 #define PA_ERROR(...) pa_log(RETRO_LOG_ERROR, __VA_ARGS__)

@@ -43,9 +43,11 @@ static int g_filter_on_menu_enter = -1;
  * every game).  Picoarch reads /mnt/sdcard/frogui/settings.txt at startup and
  * overrides scale_filter accordingly.  No in-game menu option to change. */
 #define FROGUI_SETTINGS_FILE "/mnt/sdcard/frogui/settings.txt"
-static void load_frogui_filter(void) {
+#define LAST_GAME_FILE       "/mnt/sdcard/picoarch/last_game.txt"
+static int g_auto_resume = 0;
+static void load_frogui_settings(void) {
 	FILE *f = fopen(FROGUI_SETTINGS_FILE, "r");
-	if (!f) { fprintf(stderr, "DBG load_frogui_filter: no settings file\n"); return; }
+	if (!f) { DBG("DBG load_frogui_settings: no settings file\n"); return; }
 	char line[256];
 	while (fgets(line, sizeof(line), f)) {
 		char *eq = strchr(line, '=');
@@ -57,13 +59,53 @@ static void load_frogui_filter(void) {
 		if (strcmp(line, "filter") == 0) {
 			if (strcmp(val, "bilinear") == 0)      scale_filter = SCALE_FILTER_BILINEAR;
 			else if (strcmp(val, "nearest") == 0)  scale_filter = SCALE_FILTER_NEAREST;
-			fprintf(stderr, "DBG load_frogui_filter: filter=%s → scale_filter=%d\n",
+			DBG("DBG load_frogui_settings: filter=%s → scale_filter=%d\n",
 			        val, scale_filter);
+		} else if (strcmp(line, "auto_resume") == 0) {
+			g_auto_resume = (strcmp(val, "on") == 0) ? 1 : 0;
+			DBG("DBG load_frogui_settings: auto_resume=%d\n", g_auto_resume);
 		}
 	}
 	fclose(f);
 }
+static void load_frogui_filter(void) { load_frogui_settings(); }
+
+static int read_last_game(char *core, size_t cs, char *rom, size_t rs) {
+	FILE *f = fopen(LAST_GAME_FILE, "r");
+	if (!f) { DBG("DBG read_last_game: file missing (good)\n"); return 0; }
+	core[0] = rom[0] = 0;
+	if (fgets(core, cs, f)) core[strcspn(core, "\r\n")] = 0;
+	if (fgets(rom,  rs, f)) rom[strcspn(rom, "\r\n")]   = 0;
+	fclose(f);
+	DBG("DBG read_last_game: core=%s rom=%s\n", core, rom);
+	return (core[0] && rom[0]);
+}
+static void write_last_game(const char *core, const char *rom) {
+	FILE *f = fopen(LAST_GAME_FILE, "w");
+	if (!f) return;
+	fprintf(f, "%s\n%s\n", core, rom);
+	fflush(f); fsync(fileno(f));
+	fclose(f);
+	sync();
+}
+static void clear_last_game(void) {
+	int r = unlink(LAST_GAME_FILE);
+	DBG("DBG clear_last_game: unlink ret=%d errno=%d\n", r, errno);
+	sync();
+}
 #endif
+
+void dbg_log(const char *fmt, ...) {
+	static int enabled = -1;
+	if (enabled == -1) {
+		enabled = (access("/mnt/sdcard/log.txt", F_OK) == 0) ? 1 : 0;
+	}
+	if (!enabled) return;
+	va_list ap;
+	va_start(ap, fmt);
+	vfprintf(stderr, fmt, ap);
+	va_end(ap);
+}
 
 static void sigsegv_handler(int sig) {
 	/* fprintf is not async-signal-safe; use write() directly */
@@ -317,7 +359,7 @@ int save_config(int is_game)
 	FILE *config_file;
 
 	config_file_name(config_filename, MAX_PATH, is_game);
-	fprintf(stderr, "DBG save_config(is_game=%d) → %s\n", is_game, config_filename);
+	DBG("DBG save_config(is_game=%d) → %s\n", is_game, config_filename);
 	config_file = fopen(config_filename, "wb");
 	if (!config_file) {
 		fprintf(stderr, "Could not write config to %s (errno=%d)\n", config_filename, errno);
@@ -330,7 +372,7 @@ int save_config(int is_game)
 	fflush(config_file);
 	fsync(fileno(config_file));
 	fclose(config_file);
-	fprintf(stderr, "DBG save_config: fclose done\n");
+	DBG("DBG save_config: fclose done\n");
 
 	if (is_game)
 		config_override = 1;
@@ -345,16 +387,16 @@ static void alloc_config_buffer(char **config_ptr) {
 	config_override = 0;
 
 	config_file_name(config_filename, MAX_PATH, 1);
-	fprintf(stderr, "DBG alloc_config_buffer: try game-cfg=%s\n", config_filename);
+	DBG("DBG alloc_config_buffer: try game-cfg=%s\n", config_filename);
 	config_file = fopen(config_filename, "rb");
 	if (config_file) {
 		config_override = 1;
-		fprintf(stderr, "DBG alloc_config_buffer: game-cfg HIT\n");
+		DBG("DBG alloc_config_buffer: game-cfg HIT\n");
 	} else {
 		config_file_name(config_filename, MAX_PATH, 0);
-		fprintf(stderr, "DBG alloc_config_buffer: try global-cfg=%s\n", config_filename);
+		DBG("DBG alloc_config_buffer: try global-cfg=%s\n", config_filename);
 		config_file = fopen(config_filename, "rb");
-		fprintf(stderr, "DBG alloc_config_buffer: global-cfg %s\n", config_file ? "HIT" : "MISS");
+		DBG("DBG alloc_config_buffer: global-cfg %s\n", config_file ? "HIT" : "MISS");
 	}
 
 	if (!config_file)
@@ -433,12 +475,24 @@ void handle_emu_action(emu_action action)
 	{
 #ifdef PLATFORM_SF3000
 		extern int sf3000_use_hwdisp;
-		fprintf(stderr, "DBG EACTION_MENU: use_hwdisp=%d filter=%d\n",
+		DBG("DBG EACTION_MENU: use_hwdisp=%d filter=%d\n",
 		        sf3000_use_hwdisp, scale_filter);
 #endif
 		toggle_fast_forward(1); /* Force FF off */
 		sram_write();
-		fprintf(stderr, "DBG EACTION_MENU: sram_write done\n");
+		DBG("DBG EACTION_MENU: sram_write done\n");
+#ifdef PLATFORM_SF3000
+		/* Auto-resume snapshot on menu open — only safe point to save
+		 * mid-game (game is paused while menu is up). */
+		if (g_auto_resume && !g_is_frogui) {
+			int prev = state_slot;
+			state_slot = 99;
+			state_write();
+			state_slot = prev;
+			sync();
+			DBG("DBG auto-resume: state saved to slot 99 (menu open)\n");
+		}
+#endif
 	}
 #ifdef MMENU
 		if (mmenu && content && content->path) {
@@ -474,9 +528,9 @@ void handle_emu_action(emu_action action)
 		else {
 #endif
 			fb1_menu_enter();
-			fprintf(stderr, "DBG menu_loop: ENTER\n");
+			DBG("DBG menu_loop: ENTER\n");
 			menu_loop();
-			fprintf(stderr, "DBG menu_loop: EXIT\n");
+			DBG("DBG menu_loop: EXIT\n");
 			fb1_menu_exit();
 #ifdef MMENU
 		}
@@ -653,6 +707,24 @@ int main(int argc, char **argv) {
 	signal(SIGABRT, sigsegv_handler);
 	signal(SIGILL,  sigsegv_handler);
 	signal(SIGFPE,  sigsegv_handler);
+#ifdef PLATFORM_SF3000
+	/* AUTO-RESUME: if FrogUI launch and a last-game marker exists with
+	 * auto_resume=on, redirect to that game with state restore.  Marker
+	 * cleared on clean exit to FrogUI (Quit). */
+	if (argc > 1 && strcmp(argv[1], FROGUI_CORE) == 0) {
+		load_frogui_settings();
+		if (g_auto_resume) {
+			char lg_core[512], lg_rom[512];
+			if (read_last_game(lg_core, sizeof(lg_core), lg_rom, sizeof(lg_rom))) {
+				DBG("DBG main: auto-resume redirect → %s + %s\n",
+				        lg_core, lg_rom);
+				setenv("PICOARCH_AUTO_RESUME", "1", 1);
+				execl(PICOARCH_BIN, "picoarch", lg_core, lg_rom, NULL);
+				/* fall through on execl failure */
+			}
+		}
+	}
+#endif
 	char content_path[MAX_PATH];
 	char tag_name[MAX_PATH];
 
@@ -705,16 +777,24 @@ int main(int argc, char **argv) {
 
 	set_defaults();
 	load_config();
-	fprintf(stderr, "DBG main: post-load_config scale_filter=%d scale_size=%d override=%d\n",
+	DBG("DBG main: post-load_config scale_filter=%d scale_size=%d override=%d\n",
 	        scale_filter, scale_size, config_override);
 #ifdef PLATFORM_SF3000
-	/* Filter applies to games only.  FrogUI stays SW — driver.so's first
-	 * p_disp hangs on cold boot for 854×480 input regardless of pre-init
-	 * (probed mmz/ge/dis open, double init/deinit, SW-warmup, dim fudge).
-	 * Accept HW→FrogUI exit squish as the known cost. */
-	if (strcmp(core_path, FROGUI_CORE) != 0)
-		load_frogui_filter();
-	fprintf(stderr, "DBG main: post-FrogUI-override scale_filter=%d\n", scale_filter);
+	/* Filter + auto_resume from FrogUI settings (games only; FrogUI stays SW). */
+	if (strcmp(core_path, FROGUI_CORE) != 0) {
+		load_frogui_settings();
+		/* Record current game as "last game" so a power-cycle resumes it. */
+		if (g_auto_resume) {
+			write_last_game(core_path, content_path);
+			/* Always try slot 99 auto state on game launch when auto_resume
+			 * is on (boot redirect OR manual FrogUI launch).  state_resume
+			 * silently falls through if slot 99 file doesn't exist. */
+			resume_slot = 99;
+			DBG("DBG main: auto-resume → resume_slot=99\n");
+		}
+	}
+	DBG("DBG main: post-FrogUI-override scale_filter=%d auto_resume=%d\n",
+	        scale_filter, g_auto_resume);
 #endif
 	core_load();
 
@@ -755,6 +835,17 @@ int main(int argc, char **argv) {
 
 int quit(int code) {
 	menu_finish();
+#ifdef PLATFORM_SF3000
+	/* Final auto-resume save before unloading core. */
+	if (g_auto_resume && !g_is_frogui && current_core.retro_unload_game) {
+		int prev = state_slot;
+		state_slot = 99;
+		state_write();
+		state_slot = prev;
+		sync();
+		DBG("DBG quit: auto-resume final save to slot 99\n");
+	}
+#endif
 	core_unload();
 	fb1_blank(0);   /* restore OSD overlay; next process re-blanks if needed */
 
@@ -780,8 +871,15 @@ int quit(int code) {
 		next_is_standalone = (strcmp(core_path, "standalone") == 0 && rom_path[0]);
 	}
 
-	fprintf(stderr, "DBG quit: use_hwdisp=%d next_standalone=%d core_path[0]=%d rom_path[0]=%d\n",
+	DBG("DBG quit: use_hwdisp=%d next_standalone=%d core_path[0]=%d rom_path[0]=%d\n",
 	        sf3000_use_hwdisp, next_is_standalone, !!core_path[0], !!rom_path[0]);
+	/* Clean exit to FrogUI: clear last-game marker so next boot lands on
+	 * FrogUI instead of auto-resuming.  Going to another game/standalone
+	 * doesn't clear — that new launch will overwrite the marker. */
+	if (!core_path[0] && !rom_path[0]) {
+		clear_last_game();
+		DBG("DBG quit: cleared last_game marker (going to FrogUI)\n");
+	}
 	/* WARM-BOOT marker: if we leave HCGE active, the next picoarch process
 	 * (same PPID = same icube shell child) early-inits hwdisp in
 	 * sf3000_fb_init so FrogUI doesn't try to SW-render onto a fb0 still
@@ -792,7 +890,7 @@ int quit(int code) {
 	}
 	if (!next_is_standalone) {
 		hwdisp_deinit();
-		fprintf(stderr, "DBG quit: hwdisp_deinit done\n");
+		DBG("DBG quit: hwdisp_deinit done\n");
 	}
 	/* Keep fb0/dis fds open across exec — closing them breaks the panel
 	 * state recovery (was working in commit 6537239). */
