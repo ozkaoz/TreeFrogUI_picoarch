@@ -687,6 +687,12 @@ int core_load_content(struct content *content) {
 		/* fMSX works best with joypad + keyboard */
 		current_core.retro_set_controller_port_device(0, RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 0));
 	}
+	if (!strcmp(core_name, "tyrquake") && current_core.retro_set_controller_port_device) {
+		/* tyrquake only applies its key bindings inside
+		 * retro_set_controller_port_device; without this call no input is
+		 * bound (controls dead + console spam on button press). */
+		current_core.retro_set_controller_port_device(0, RETRO_DEVICE_JOYPAD);
+	}
 
 	current_core.retro_get_system_av_info(&av_info);
 
