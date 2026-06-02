@@ -846,11 +846,61 @@ static void *sf3000_sound_handle = NULL;
 static int (*sf3000_sound_driver_init)(void *device_name, int sample_rate, int channels) = NULL;
 static int (*sf3000_sound_driver_playframe)(const void *buffer, int bytes) = NULL;
 static int (*sf3000_sound_driver_deinit)(void) = NULL;
+
+/* Non-blocking audio: a dedicated consumer thread owns the *blocking*
+ * sound_driver_playframe() DAC write. The emu thread only enqueues into this
+ * SPSC ring and never blocks, so audio over/underrun can never freeze the
+ * emulator. Video stays the sole frame pacer. */
+#define SF3000_ARING_FRAMES 4096          /* power of two, ~93ms @ 44100Hz */
+#define SF3000_ARING_MASK   (SF3000_ARING_FRAMES - 1)
+#define SF3000_ACHUNK       735           /* 44100/60, one video frame's audio */
+
+static struct audio_frame sf3000_aring[SF3000_ARING_FRAMES];
+static unsigned           sf3000_aring_w = 0;   /* producer: emu thread   */
+static unsigned           sf3000_aring_r = 0;   /* consumer: audio thread */
+static pthread_mutex_t    sf3000_aring_mtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t          sf3000_audio_thread;
+static volatile int       sf3000_audio_running = 0;
+
+static void *sf3000_audio_thread_fn(void *unused)
+{
+	(void)unused;
+	struct audio_frame chunk[SF3000_ACHUNK];
+
+	while (sf3000_audio_running) {
+		int have_chunk = 0;
+
+		pthread_mutex_lock(&sf3000_aring_mtx);
+		unsigned avail = sf3000_aring_w - sf3000_aring_r;  /* free-running */
+		if (avail >= SF3000_ACHUNK) {
+			for (int i = 0; i < SF3000_ACHUNK; i++) {
+				chunk[i] = sf3000_aring[sf3000_aring_r & SF3000_ARING_MASK];
+				sf3000_aring_r++;
+			}
+			have_chunk = 1;
+		}
+		pthread_mutex_unlock(&sf3000_aring_mtx);
+
+		if (!have_chunk) {
+			usleep(2000);  /* underrun: wait for the emu thread to refill */
+			continue;
+		}
+
+		/* Blocks until the DAC drains — but on THIS thread, not the emu. */
+		if (sf3000_sound_driver_playframe)
+			sf3000_sound_driver_playframe(chunk, SF3000_ACHUNK);
+	}
+	return NULL;
+}
 #endif
 
 static void plat_sound_finish(void)
 {
 #ifdef PLATFORM_SF3000
+	if (sf3000_audio_running) {
+		sf3000_audio_running = 0;
+		pthread_join(sf3000_audio_thread, NULL);
+	}
 	if (sf3000_sound_driver_deinit) {
 		sf3000_sound_driver_deinit();
 	}
@@ -896,7 +946,19 @@ static int plat_sound_init(void)
 
 	audio.in_sample_rate = sample_rate;
 	audio.out_sample_rate = SAMPLE_RATE;
-	
+
+	/* Start the non-blocking audio consumer thread. */
+	sf3000_aring_w = sf3000_aring_r = 0;
+	if (!sf3000_audio_running) {
+		sf3000_audio_running = 1;
+		if (pthread_create(&sf3000_audio_thread, NULL,
+		                   sf3000_audio_thread_fn, NULL) != 0) {
+			sf3000_audio_running = 0;
+			PA_ERROR("SF3000: failed to start audio thread\n");
+			return -1;
+		}
+	}
+
 	PA_INFO("SF3000: Proprietary audio driver initialized at %d Hz\n", SAMPLE_RATE);
 	return 0;
 #else
@@ -949,8 +1011,17 @@ float plat_sound_capacity(void)
 void plat_sound_write(const struct audio_frame *data, int frames)
 {
 #ifdef PLATFORM_SF3000
-	if (sf3000_sound_driver_playframe) {
-		sf3000_sound_driver_playframe(data, frames);
+	/* Non-blocking enqueue: hand frames to the consumer thread and return
+	 * immediately. On overrun we drop the excess rather than block the emu. */
+	if (sf3000_audio_running) {
+		pthread_mutex_lock(&sf3000_aring_mtx);
+		for (int i = 0; i < frames; i++) {
+			if (sf3000_aring_w - sf3000_aring_r >= SF3000_ARING_FRAMES)
+				break;  /* ring full — drop remaining frames */
+			sf3000_aring[sf3000_aring_w & SF3000_ARING_MASK] = data[i];
+			sf3000_aring_w++;
+		}
+		pthread_mutex_unlock(&sf3000_aring_mtx);
 	}
 #else
 	int consumed = 0;
