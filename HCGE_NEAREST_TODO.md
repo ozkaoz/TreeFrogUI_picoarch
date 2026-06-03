@@ -161,6 +161,34 @@ fragile, not attempted.
 `G[0x3290/0x3294/0x3298]`; no filter selector. `fbdev_set_enhance` @0x6ff0 =
 sharpness/contrast ioctls (0x40180d02 / 0x80180d01), not the scaler filter.
 
+### Attempt 2 (also parked): pretty HW-bilinear FrogUI + SW nearest games
+
+Goal: FrogUI menu always HW bilinear (looks great), games selectable
+bilinear=HW / nearest=pure-SW (sharp+fast). Tried in `plat_sdl.c sf3000_fb_blit`:
+- FrogUI 854×480 frames → `hwdisp_init` on demand + `hwdisp_present` (HW bilinear,
+  1:1 rotate). **This worked — FrogUI was pretty.**
+- nearest games → skip HW (warm-boot early-init in `sf3000_fb_init` gated off when
+  `frogui/settings.txt filter=nearest`), use pure-SW path.
+
+**Blocker — HW→SW display-controller state leak:** a nearest game launched *from*
+the (HW) FrogUI comes up **squished to the right** (colors fine = it's a
+geometry/scaler issue, not pixel format). `sf3000_fb_init` FBIOPUTs fb0 back to
+720×1280 32bpp + FBIOPAN(0,0) + blank-cycle, but that only resets the **fb
+geometry** — the **display-controller scaler** (the `scale.h_div/v_div/h_mul/v_mul`
++ rotate config the driver programs via `/dev/dis`, seen in logs as
+`video_driver_setting 854 480 …`) stays in FrogUI's HW config, so the SW frame
+gets re-scaled/panned → squish. Tried: skipping HW early-init for nearest (not
+enough — the *previous* FrogUI process already left the scaler programmed);
+deinit-gate in-process (worse — strands fb0 in HW mode → row tearing).
+
+**Next time:** to mix HW-FrogUI with SW-games, the SW path (or `sf3000_fb_init`)
+must fully **reset the display-controller scaler to identity/passthrough** on a
+HW→SW transition — find the `/dev/dis` ioctl (or `video_driver_setmode`/`setting`
+sequence) that sets `scale.*`+rotate and program it for 1:1 720×1280, not just
+FBIOPUT. OR keep FrogUI on SW too (no mixing) and only chase real HW nearest
+(coefficient forging, Attempt 1). `present_integer` (sharp HW) is ~40fps — too
+slow vs pure SW which is sharp AND full-speed for small cores.
+
 ### What shipped instead (this session)
 
 `hwdisp_present_integer` (already in hwdisp.c): SW nearest integer-replicate the
