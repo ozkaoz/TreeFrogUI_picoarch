@@ -1506,20 +1506,58 @@ static void sf3000_frame_limit(void) {
     last_tv = tv;
 }
 
+/* Panel geometry: SF3000 854x480 16:9, R36SX 640x480 4:3 (set via Makefile -D). */
+#ifndef PANEL_W
+#define PANEL_W 854
+#endif
+#ifndef PANEL_H
+#define PANEL_H 480
+#endif
+#ifndef PANEL_ASPECT_NUM
+#define PANEL_ASPECT_NUM 16
+#endif
+#ifndef PANEL_ASPECT_DEN
+#define PANEL_ASPECT_DEN 9
+#endif
+
 void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
-    /* WARM-BOOT: hwdisp pre-init'd by sf3000_fb_init via marker file.
-     * For FrogUI panel-size (854×480) frames, force HW bilinear pass-
-     * through — only path proven safe with panel-native input.  Cold-boot
-     * FrogUI takes SW path (no marker → use_hwdisp=0). */
-    if (sf3000_use_hwdisp && src != screen->pixels &&
-        width == 854 && height == 480) {
-        hwdisp_set_filter(0);
-        hwdisp_set_target_aspect(0, 0);
-        hwdisp_present(src, width, height, pitch);
-        return;
+    {
+        extern void dbg_log(const char *fmt, ...);
+        static int s_blit = 0;
+        if (s_blit < 8) {
+            s_blit++;
+            dbg_log("DBG blit#%d: src=%p screen=%p w=%d h=%d pitch=%d scale_filter=%d scale_size=%d use_hw=%d PANEL=%dx%d\n",
+                    s_blit, src, (void*)screen->pixels, width, height, pitch,
+                    scale_filter, scale_size, sf3000_use_hwdisp, PANEL_W, PANEL_H);
+        }
     }
-    /* Lazy-init hwdisp on first bilinear frame. */
-    if (!sf3000_use_hwdisp && scale_filter == SCALE_FILTER_BILINEAR) {
+    /* WARM-BOOT: hwdisp pre-init'd by sf3000_fb_init via marker file.
+     * For FrogUI panel-size frames, force HW bilinear pass-through — only path
+     * proven safe with panel-native input.  Cold-boot FrogUI takes SW path
+     * (no marker → use_hwdisp=0). */
+    /* FrogUI / panel-size core frames → HW path: driver.so does rotate90 + scale
+     * to native panel. filter 0 + aspect 0 = pure 1:1-rotate pass-through (proven
+     * good). The SW fb path below is SF3000-panel-specific (854x480 + fixed 90°
+     * transpose) and does NOT match the R36SX panel, so panel-size frames must go
+     * through the driver. Lazy-init here so cold-boot FrogUI also uses HW. */
+    if (src != screen->pixels && width == PANEL_W && height == PANEL_H) {
+        if (!sf3000_use_hwdisp && hwdisp_init() == 0) {
+            sf3000_use_hwdisp = 1;
+            fprintf(stderr, "sf3000_fb_blit: HW path active (panel-size)\n");
+        }
+        if (sf3000_use_hwdisp) {
+            /* R36SX driver native = 1280x720, rotate:0. Feed it a full native-size
+             * frame (SW-upscale src→1280x720), driver then scales to 640x480 panel.
+             * Panel-size (640x480) input alone presents black on this driver. */
+            hwdisp_set_filter(1);
+            hwdisp_set_target_aspect(0, 0);
+            hwdisp_present(src, width, height, pitch);
+            return;
+        }
+    }
+    /* Always HW: init on first game frame regardless of filter. SW path kept
+     * only as fallback if HW init fails. */
+    if (!sf3000_use_hwdisp) {
         if (hwdisp_init() == 0) {
             sf3000_use_hwdisp = 1;
             fprintf(stderr, "sf3000_fb_blit: HW path active\n");
@@ -1529,9 +1567,8 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
 
 if (sf3000_use_hwdisp) {
         int aspect = (src == screen->pixels) || (scale_size != SCALE_SIZE_FULL);
-        hwdisp_set_target_aspect(aspect ? 16 : 0, aspect ? 9 : 0);
-        /* Never use nearest-upscale for panel-size (>=800px wide) input — crashes driver */
-        hwdisp_set_filter((scale_filter == SCALE_FILTER_NEAREST && width < 800) ? 1 : 0);
+        hwdisp_set_target_aspect(aspect ? PANEL_ASPECT_NUM : 0, aspect ? PANEL_ASPECT_DEN : 0);
+        hwdisp_set_filter(0);   /* always HW bilinear (SW nearest path removed) */
 
         /* FPS / overlay text: render into a copy of src (RGB565), since src
          * itself is owned by the core and may be read-only. */

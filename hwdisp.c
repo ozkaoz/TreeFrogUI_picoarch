@@ -16,11 +16,22 @@
 #include <stdlib.h>
 #include <string.h>
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/ioctl.h>
+#include <linux/fb.h>
 extern void dbg_log(const char *fmt, ...);
 #define DBG(...) dbg_log(__VA_ARGS__)
 
-#define HW_W   1280
-#define HW_H    720
+#ifndef HW_NATIVE_W
+#define HW_NATIVE_W 1280
+#endif
+#ifndef HW_NATIVE_H
+#define HW_NATIVE_H  720
+#endif
+#define HW_W   HW_NATIVE_W
+#define HW_H   HW_NATIVE_H
 #define HW_PITCH (HW_W * 2)
 #define HW_BUFSZ (HW_W * HW_H * 2)
 
@@ -47,6 +58,66 @@ static uint16_t *g_near_buf = NULL;
 static int g_aspect_num = 0;
 static int g_aspect_den = 0;
 static int g_filter_nearest = 0;
+
+/* Direct-fb present: after video_drivers_init the driver reconfigures fb0 to its
+ * native landscape geometry (R36SX: 1280x720 RGB565) and programs the display
+ * controller to scale fb0 → physical panel (640x480), rotate:0. The panel scans
+ * fb0 continuously, so we present by writing RGB565 straight into fb0 — no
+ * video_driver_disp_frame (which hard-hangs on the engine sync on this driver). */
+static int       g_fbfd    = -1;
+static uint16_t *g_fbmem   = NULL;
+static int       g_fbw     = 0;   /* fb visible width  (px) */
+static int       g_fbh     = 0;   /* fb visible height (px) */
+static int       g_fbstride= 0;   /* fb row stride     (px) */
+static long      g_fbsize  = 0;   /* mmap length (bytes) */
+
+static void hwdisp_fb_open(void) {
+    struct fb_var_screeninfo vi;
+    struct fb_fix_screeninfo fi;
+    g_fbfd = open("/dev/fb0", O_RDWR);
+    if (g_fbfd < 0) { DBG("DBG fbwrite: open fb0 failed\n"); return; }
+    if (ioctl(g_fbfd, FBIOGET_VSCREENINFO, &vi) < 0 ||
+        ioctl(g_fbfd, FBIOGET_FSCREENINFO, &fi) < 0) {
+        DBG("DBG fbwrite: ioctl GET info failed\n");
+        close(g_fbfd); g_fbfd = -1; return;
+    }
+    g_fbw      = vi.xres;
+    g_fbh      = vi.yres;
+    g_fbstride = fi.line_length / 2;       /* bytes → px (RGB565) */
+    g_fbsize   = fi.smem_len;
+    g_fbmem = (uint16_t *)mmap(NULL, g_fbsize, PROT_READ|PROT_WRITE, MAP_SHARED, g_fbfd, 0);
+    if (g_fbmem == MAP_FAILED) {
+        DBG("DBG fbwrite: mmap failed\n");
+        g_fbmem = NULL; close(g_fbfd); g_fbfd = -1; return;
+    }
+    DBG("DBG fbwrite: fb0 %dx%d stride=%dpx bpp=%d size=%ld OK\n",
+        g_fbw, g_fbh, g_fbstride, vi.bits_per_pixel, g_fbsize);
+}
+
+/* Nearest-scale src(w×h RGB565) → full fb (g_fbw×g_fbh), write directly to fb0.
+ * rotate:0 (landscape fb), so straight scale, no transpose. Returns 1 if drawn. */
+static int hwdisp_fb_present(const void *src, int w, int h, int pitch_bytes) {
+    if (!g_fbmem || g_fbw <= 0 || g_fbh <= 0 || w <= 0 || h <= 0) return 0;
+    const int sp = pitch_bytes / 2;
+    const uint16_t *s = (const uint16_t *)src;
+    /* Precompute x source map for the scale. */
+    static int xmap[2048];
+    static int last_w = -1, last_fbw = -1;
+    if (w != last_w || g_fbw != last_fbw) {
+        int n = g_fbw < 2048 ? g_fbw : 2048;
+        for (int dx = 0; dx < n; dx++) xmap[dx] = dx * w / g_fbw;
+        last_w = w; last_fbw = g_fbw;
+    }
+    int draw_w = g_fbw < 2048 ? g_fbw : 2048;
+    for (int dy = 0; dy < g_fbh; dy++) {
+        int sy = dy * h / g_fbh;
+        const uint16_t *srow = s + sy * sp;
+        uint16_t *drow = g_fbmem + (size_t)dy * g_fbstride;
+        for (int dx = 0; dx < draw_w; dx++)
+            drow[dx] = srow[xmap[dx]];
+    }
+    return 1;
+}
 
 int hwdisp_init(void) {
     extern void sf3000_dump_fb_state(const char *);
@@ -80,6 +151,8 @@ int hwdisp_init(void) {
     g_active = 1;
     fprintf(stderr, "hwdisp: HW path active (init rv=%d)\n", rv);
     sf3000_dump_fb_state("hwdisp_init/post");
+    /* mmap fb0 at its post-init (driver-native) geometry for direct presents. */
+    hwdisp_fb_open();
     return 0;
 }
 
@@ -275,7 +348,22 @@ static void upscale_nearest(const void *src, int w, int h, int pitch_bytes) {
 }
 
 void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {
-    if (!g_active || !p_disp || !src) return;
+    static int s_n = 0;
+    int lg = (s_n < 8);
+    s_n++;
+    if (lg) DBG("DBG present#%d: src=%p w=%d h=%d pitch=%d active=%d p_disp=%p filt=%d asp=%d/%d HW=%dx%d\n",
+                s_n, src, w, h, pitch_bytes, g_active, (void*)p_disp,
+                g_filter_nearest, g_aspect_num, g_aspect_den, HW_W, HW_H);
+    if (!g_active || !src) { if (lg) DBG("DBG present#%d: EARLY-RET\n", s_n); return; }
+    /* Preferred path: write straight to fb0 (driver scaler → panel). Avoids the
+     * hanging video_driver_disp_frame entirely. */
+    if (g_fbmem) {
+        int ok = hwdisp_fb_present(src, w, h, pitch_bytes);
+        if (lg) DBG("DBG present#%d: fbwrite ok=%d fb=%dx%d\n", s_n, ok, g_fbw, g_fbh);
+        if (ok) return;
+    }
+    if (!p_disp) { if (lg) DBG("DBG present#%d: no p_disp\n", s_n); return; }
+    int rv;
     /* Nearest filter: SW upscale to 1280×720, driver does no further scale. */
     if (g_filter_nearest) {
         if (!g_near_buf) {
@@ -284,7 +372,9 @@ void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {
         }
         if (g_near_buf) {
             upscale_nearest(src, w, h, pitch_bytes);
-            p_disp(g_near_buf, HW_W, HW_H, HW_PITCH);
+            if (lg) DBG("DBG present#%d: nearest pre p_disp(%p,%d,%d,%d)\n", s_n, (void*)g_near_buf, HW_W, HW_H, HW_PITCH);
+            rv = p_disp(g_near_buf, HW_W, HW_H, HW_PITCH);
+            if (lg) DBG("DBG present#%d: nearest post p_disp rv=%d\n", s_n, rv);
             return;
         }
         /* Fallthrough to HW path if alloc failed */
@@ -292,29 +382,40 @@ void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {
 
     /* HW (bilinear) path: pass through, optional aspect pad. */
     if (g_aspect_num <= 0 || g_aspect_den <= 0) {
-        p_disp((void *)src, w, h, pitch_bytes);
+        if (lg) DBG("DBG present#%d: passthru pre p_disp(%p,%d,%d,%d)\n", s_n, src, w, h, pitch_bytes);
+        rv = p_disp((void *)src, w, h, pitch_bytes);
+        if (lg) DBG("DBG present#%d: passthru post p_disp rv=%d\n", s_n, rv);
         return;
     }
 
     int pad_w = h * g_aspect_num / g_aspect_den;
     if (pad_w <= w) {
-        p_disp((void *)src, w, h, pitch_bytes);
+        if (lg) DBG("DBG present#%d: nopad pre p_disp\n", s_n);
+        rv = p_disp((void *)src, w, h, pitch_bytes);
+        if (lg) DBG("DBG present#%d: nopad post p_disp rv=%d\n", s_n, rv);
         return;
     }
 
     pad_horizontal(src, w, h, pitch_bytes, pad_w);
     if (!g_pad_buf) {
-        p_disp((void *)src, w, h, pitch_bytes);
+        rv = p_disp((void *)src, w, h, pitch_bytes);
+        if (lg) DBG("DBG present#%d: padfail post rv=%d\n", s_n, rv);
         return;
     }
-    p_disp(g_pad_buf, pad_w, h, pad_w * 2);
+    if (lg) DBG("DBG present#%d: pad pre p_disp(pad_w=%d)\n", s_n, pad_w);
+    rv = p_disp(g_pad_buf, pad_w, h, pad_w * 2);
+    if (lg) DBG("DBG present#%d: pad post p_disp rv=%d\n", s_n, rv);
 }
 
 /* Panel-integer present: SW nearest-upscale src by largest integer N where
  * N*w<=854 && N*h<=480, center result in 854x480 black panel buffer, send to
  * driver with filter=0 (pass-through). True integer pixel ratio on panel. */
+#ifndef PANEL_W
 #define PANEL_W 854
+#endif
+#ifndef PANEL_H
 #define PANEL_H 480
+#endif
 #define PANEL_PITCH (PANEL_W * 2)
 
 static uint16_t *g_panel_buf = NULL;
@@ -404,6 +505,8 @@ void hwdisp_deinit(void) {
     sf3000_dump_fb_state("hwdisp_deinit/pre");
     if (p_deinit) p_deinit();
     sf3000_dump_fb_state("hwdisp_deinit/post-p_deinit");
+    if (g_fbmem) { munmap(g_fbmem, g_fbsize); g_fbmem = NULL; }
+    if (g_fbfd >= 0) { close(g_fbfd); g_fbfd = -1; }
     if (g_pad_buf) { free(g_pad_buf); g_pad_buf = NULL; g_pad_cap = 0; g_pad_w = 0; g_pad_h = 0; }
     if (g_near_buf) { free(g_near_buf); g_near_buf = NULL; }
     if (g_panel_buf) { free(g_panel_buf); g_panel_buf = NULL; }
