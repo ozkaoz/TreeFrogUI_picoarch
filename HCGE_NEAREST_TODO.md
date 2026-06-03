@@ -120,3 +120,54 @@ proves the flag isn't reachable.
 - `/mnt/sdcard/hcge.log` — dedicated fsync'd HCGE step log.
 - `/mnt/sdcard/picoarch_trace.log` — fsync'd main()/quit() milestones.
 - Create `/mnt/sdcard/log.txt` to enable general `DBG`.
+
+---
+
+## 2026-06 session: driver.so live-patch attempt — FAILED, here's why
+
+Tried the simplest Path-A idea (flip the smooth flag in the loaded `driver.so`,
+per-filter, before the render thread spawns). **Got the patch fully working and
+verified on device — but it had ZERO visual effect.** Both nearest and bilinear
+render identical (bilinear). Confirmed via on-device log (`init: … want=1
+pre-patch=0 now=240a0000`, gambatte `present#1 w=160 h=144 instr=240a0000`).
+
+What was found in *this* driver.so (device copy, md5 `83ceee0d…`, addresses match
+the table above — NOT mini_rkgame's `dfc0…`):
+
+- **`render_options` = byte at hcge_state +269 (0x10D).** `hcge_stretch_blit`
+  @0xa6b8 reads it (`lbu v0,269; beqz → skip designfilter`).
+- **`hcge_set_state` @0xca74 sets +269 = bit2 of source-state word at +200
+  (0xC8)** (`lw v0,200; ext v0,v0,2,1; sb v0,269`).
+- **`fb_paint_task` @0x4e98 writes +200 = 4 unconditionally** (`li t2,4` @0x51a8,
+  fileoff==vaddr; `04000a24`). So render_options is always 1 = SMOOTH_UPSCALE.
+- Patched `li t2,4` → `li t2,0` (state[200]=0 → render_options=NONE) via picoarch
+  live mprotect+`__builtin___clear_cache`, applied **before** `video_drivers_init`
+  spawns the render thread (cold icache). **No effect.**
+- Also tried clearing the stretch filter-field bits in `hcge_set_state`
+  (`v0[100]` bits 25/26/27 @0xcc80/cc88/cc90, `ins …,a0` → `ins …,zero`). **No
+  effect, no glitch.**
+
+**Root cause / conclusion:** per `ge_api.h`, `HCGE_DSRO_NONE=0` means "no
+interpolation for upscale" — but this driver implements NONE as **skip
+designfilter** (skip coefficient *reload*), NOT "load a nearest/delta kernel".
+The HCGE polyphase scaler (`designfilter → tunefilter → extract_coef/extract_phase`,
+@0xe4dc/0xe3b0/0x10528/0x104e8) keeps its previously-loaded/default (smooth)
+coefficients, so it still interpolates. **There is no nearest code path in the
+driver.** True HW nearest would require *forging a delta coefficient kernel*
+into the scaler (reverse `extract_coef`/`extract_phase` math + inject) — deep,
+fragile, not attempted.
+
+`video_driver_setting`/`setmode` only stash scale dims into globals
+`G[0x3290/0x3294/0x3298]`; no filter selector. `fbdev_set_enhance` @0x6ff0 =
+sharpness/contrast ioctls (0x40180d02 / 0x80180d01), not the scaler filter.
+
+### What shipped instead (this session)
+
+`hwdisp_present_integer` (already in hwdisp.c): SW nearest integer-replicate the
+small game frame (e.g. GB 160×144 → 480×432, 3×) into an **854×480 panel buffer**,
+hand to `video_driver_disp_frame` at panel size → driver does a pure **1:1
+rotate** (no magnification → no interpolation → sharp) + HW DMA present. Wired in
+`plat_sdl.c sf3000_fb_blit`: `integer_mode = (scale_filter==NEAREST && width<800)`
+→ `hwdisp_present_integer`, else `hwdisp_present` (driver bilinear fill). Only the
+cheap pixel replicate is SW; rotate+present are HW. This is the practical sharp
+result; pure zero-SW HW nearest is parked pending the coefficient-forging work.

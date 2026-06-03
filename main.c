@@ -96,15 +96,21 @@ static void clear_last_game(void) {
 #endif
 
 void dbg_log(const char *fmt, ...) {
+	/* Write directly to log.txt (append) so every picoarch process — including
+	 * the game process exec'd from FrogUI — is captured, regardless of whether
+	 * its stderr is redirected. Gated on log.txt existing (debug mode). */
 	static int enabled = -1;
+	static FILE *lf = NULL;
 	if (enabled == -1) {
 		enabled = (access("/mnt/sdcard/log.txt", F_OK) == 0) ? 1 : 0;
+		if (enabled) lf = fopen("/mnt/sdcard/log.txt", "a");
 	}
-	if (!enabled) return;
+	if (!enabled || !lf) return;
 	va_list ap;
 	va_start(ap, fmt);
-	vfprintf(stderr, fmt, ap);
+	vfprintf(lf, fmt, ap);
 	va_end(ap);
+	fflush(lf);
 }
 
 static void sigsegv_handler(int sig) {
