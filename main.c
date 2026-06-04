@@ -1,6 +1,7 @@
 // #include <png.h>
 #include <stdarg.h>
 #include <signal.h>
+#include <ucontext.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -9,7 +10,18 @@
 #include <sys/ioctl.h>
 
 #define FROGUI_CORE "/mnt/sdcard/cubegm/cores/frogui_libretro.so"
-#define PICOARCH_BIN "/mnt/sdcard/cubegm/picoarch"
+#define PICOARCH_BIN    "/mnt/sdcard/cubegm/picoarch"
+#define PICOARCH_HI_BIN "/mnt/sdcard/cubegm/picoarch_hi"
+
+/* gpsp (GBA) and pcsx_rearmed (PS1) dynarecs need the low 512MB of address space
+ * free for their fixed memory maps — run them via the high-linked picoarch_hi
+ * (text @0x20000000). Everything else uses the normal picoarch. */
+static const char *picoarch_for_core(const char *core) {
+	if (core && (strstr(core, "gpsp") || strstr(core, "pcsx") || strstr(core, "ps1")))
+		if (access(PICOARCH_HI_BIN, F_OK) == 0)   /* vfat has no exec bit → F_OK */
+			return PICOARCH_HI_BIN;
+	return PICOARCH_BIN;
+}
 #define LAUNCH_FILE "/tmp/frogui_launch.txt"
 #include "core.h"
 #include "config.h"
@@ -114,9 +126,17 @@ void dbg_log(const char *fmt, ...) {
 	fsync(fileno(lf));   /* debug: persist each line (survives crash/power-cut) */
 }
 
-static void sigsegv_handler(int sig) {
-	/* fprintf is not async-signal-safe; use write() directly */
-	char buf[64];
+static void sig_hex(char *b, int *n, unsigned long v) {
+	b[(*n)++] = '0'; b[(*n)++] = 'x';
+	for (int i = 28; i >= 0; i -= 4) {
+		int d = (v >> i) & 0xf;
+		b[(*n)++] = d < 10 ? ('0' + d) : ('a' + d - 10);
+	}
+}
+
+static void sigsegv_handler(int sig, siginfo_t *si, void *ucv) {
+	/* async-signal-safe: write() + manual formatting only */
+	char buf[160];
 	int n = 0;
 	buf[n++] = 'S'; buf[n++] = 'I'; buf[n++] = 'G'; buf[n++] = '=';
 	if (sig >= 10) buf[n++] = '0' + sig / 10;
@@ -127,6 +147,12 @@ static void sigsegv_handler(int sig) {
 	if (f >= 100)  buf[n++] = '0' + (f / 100) % 10;
 	if (f >= 10)   buf[n++] = '0' + (f / 10) % 10;
 	buf[n++] = '0' + f % 10;
+	const char *as = " addr="; for (const char *p = as; *p; p++) buf[n++] = *p;
+	sig_hex(buf, &n, si ? (unsigned long)si->si_addr : 0);
+	const char *ps = " pc="; for (const char *p = ps; *p; p++) buf[n++] = *p;
+	unsigned long pc = 0;
+	if (ucv) pc = (unsigned long)((ucontext_t *)ucv)->uc_mcontext.pc;
+	sig_hex(buf, &n, pc);
 	buf[n++] = '\n';
 	write(2, buf, n);
 	signal(sig, SIG_DFL);
@@ -709,12 +735,22 @@ static void get_tag_name(const char* in_path, char* out_tag) {
 int main(int argc, char **argv) {
 	setvbuf(stdout, NULL, _IONBF, 0);
 	setvbuf(stderr, NULL, _IONBF, 0);
-	signal(SIGSEGV, sigsegv_handler);
-	signal(SIGBUS,  sigsegv_handler);
-	signal(SIGABRT, sigsegv_handler);
-	signal(SIGILL,  sigsegv_handler);
-	signal(SIGFPE,  sigsegv_handler);
+	{
+		struct sigaction sa;
+		memset(&sa, 0, sizeof sa);
+		sa.sa_sigaction = sigsegv_handler;
+		sa.sa_flags = SA_SIGINFO;
+		sigemptyset(&sa.sa_mask);
+		sigaction(SIGSEGV, &sa, NULL);
+		sigaction(SIGBUS,  &sa, NULL);
+		sigaction(SIGABRT, &sa, NULL);
+		sigaction(SIGILL,  &sa, NULL);
+		sigaction(SIGFPE,  &sa, NULL);
+	}
 #ifdef PLATFORM_SF3000
+	dbg_log("DBG picoarch start: text~%p (hi if 0x2x) argv1=%s next-bin=%s\n",
+	        (void *)&picoarch_for_core, argc > 1 ? argv[1] : "?",
+	        argc > 1 ? picoarch_for_core(argv[1]) : "?");
 	/* AUTO-RESUME: if FrogUI launch and a last-game marker exists with
 	 * auto_resume=on, redirect to that game with state restore.  Marker
 	 * cleared on clean exit to FrogUI (Quit). */
@@ -726,7 +762,7 @@ int main(int argc, char **argv) {
 				DBG("DBG main: auto-resume redirect → %s + %s\n",
 				        lg_core, lg_rom);
 				setenv("PICOARCH_AUTO_RESUME", "1", 1);
-				execl(PICOARCH_BIN, "picoarch", lg_core, lg_rom, NULL);
+				execl(picoarch_for_core(lg_core), "picoarch", lg_core, lg_rom, NULL);
 				/* fall through on execl failure */
 			}
 		}
@@ -908,7 +944,7 @@ int quit(int code) {
 			chmod(rom_path, 0755);
 			execl(rom_path, rom_path, standalone_rom[0] ? standalone_rom : NULL, NULL);
 		} else {
-			execl(PICOARCH_BIN, "picoarch", core_path, rom_path, NULL);
+			execl(picoarch_for_core(core_path), "picoarch", core_path, rom_path, NULL);
 		}
 	}
 	execl(PICOARCH_BIN, "picoarch", FROGUI_CORE, FROGUI_CORE, NULL);

@@ -2,6 +2,7 @@
 #include <unistd.h>
 #include <sys/time.h>
 #include <dlfcn.h>
+#include <dirent.h>
 #include <math.h>
 #include "core.h"
 #include "libpicofe/fonts.h"
@@ -1523,15 +1524,30 @@ extern void dbg_log(const char *fmt, ...);
 static int g_dev_r36sx = -1;   /* -1 = undetected, 0 = SF3000, 1 = R36SX */
 static int g_dev_w = 854, g_dev_h = 480, g_dev_scale = 150;
 
+/* Recursively scan /proc/device-tree for the R36SX panel node (r63311), without
+ * forking — popen/fork inside the emulator process can disturb later dynarec
+ * memory mappings (gpsp). Bounded depth. Sets *found if seen. */
+static void dt_scan_r63311(const char *dir, int depth, int *found) {
+    if (*found || depth > 5) return;
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *e;
+    char path[512];
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        if (strstr(e->d_name, "r63311")) { *found = 1; break; }
+        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+        /* recurse into subdirs only */
+        DIR *sub = opendir(path);
+        if (sub) { closedir(sub); dt_scan_r63311(path, depth + 1, found); if (*found) break; }
+    }
+    closedir(d);
+}
+
 void sf3000_detect_device(void) {
     if (g_dev_r36sx != -1) return;
     int found = 0;
-    FILE *f = popen("grep -rlsi r63311 /proc/device-tree 2>/dev/null | head -1", "r");
-    if (f) {
-        char buf[128] = {0};
-        if (fgets(buf, sizeof buf, f) && buf[0] != '\0' && buf[0] != '\n') found = 1;
-        pclose(f);
-    }
+    dt_scan_r63311("/proc/device-tree", 0, &found);
     g_dev_r36sx = found;
     /* Both panels are 480 tall → same UI scale gives a consistent layout. */
     if (found) { g_dev_w = 640; g_dev_h = 480; g_dev_scale = 150; }
