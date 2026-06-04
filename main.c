@@ -111,6 +111,7 @@ void dbg_log(const char *fmt, ...) {
 	vfprintf(lf, fmt, ap);
 	va_end(ap);
 	fflush(lf);
+	fsync(fileno(lf));   /* debug: persist each line (survives crash/power-cut) */
 }
 
 static void sigsegv_handler(int sig) {

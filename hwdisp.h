@@ -35,6 +35,11 @@ void hwdisp_set_filter(int nearest);
  * HW scales+rotates+presents on physical panel automatically. */
 void hwdisp_present(const void *src, int w, int h, int pitch_bytes);
 
+/* Present by writing straight to fb0 (display controller scales fb0 → panel).
+ * Bypasses video_driver_disp_frame (hangs on R36SX, aborts on SF3000 panel-size).
+ * Returns 1 if presented, 0 if fb0 unavailable. */
+int hwdisp_present_direct(const void *src, int w, int h, int pitch_bytes);
+
 /* Present with TRUE panel-integer nearest scaling.
  * Internally: SW nearest-upscales src by N (largest integer where N*w<=854
  * and N*h<=480), centers in an 854x480 black panel buffer, sends to driver

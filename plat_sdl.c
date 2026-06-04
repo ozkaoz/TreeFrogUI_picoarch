@@ -918,11 +918,15 @@ static void plat_sound_finish(void)
 #endif
 }
 
+const char *sf3000_driver_path(void);
+
 static int plat_sound_init(void)
 {
 #ifdef PLATFORM_SF3000
 	if (!sf3000_sound_handle) {
-		sf3000_sound_handle = dlopen("/mnt/sdcard/cubegm/driver.so", RTLD_LAZY);
+		sf3000_sound_handle = dlopen(sf3000_driver_path(), RTLD_LAZY);
+		if (!sf3000_sound_handle)   /* fall back to generic driver.so */
+			sf3000_sound_handle = dlopen("/mnt/sdcard/cubegm/driver.so", RTLD_LAZY);
 		if (!sf3000_sound_handle) {
 			PA_ERROR("SF3000: Failed to load driver.so for audio: %s\n", dlerror());
 			return -1;
@@ -1544,6 +1548,14 @@ int sf3000_panel_w(void)  { sf3000_detect_device(); return g_dev_w; }
 int sf3000_panel_h(void)  { sf3000_detect_device(); return g_dev_h; }
 int sf3000_is_r36sx(void) { sf3000_detect_device(); return g_dev_r36sx > 0; }
 
+/* Device-correct driver.so path (video AND audio must match the panel/SoC build;
+ * loading the wrong one segfaults the proprietary audio init). */
+const char *sf3000_driver_path(void) {
+    sf3000_detect_device();
+    return g_dev_r36sx > 0 ? "/mnt/sdcard/cubegm/driver_r36sx.so"
+                           : "/mnt/sdcard/cubegm/driver_sf3000.so";
+}
+
 #define PANEL_W (sf3000_panel_w())
 #define PANEL_H (sf3000_panel_h())
 #define PANEL_ASPECT_NUM (sf3000_is_r36sx() ? 4 : 16)
@@ -1564,28 +1576,25 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
      * For FrogUI panel-size frames, force HW bilinear pass-through — only path
      * proven safe with panel-native input.  Cold-boot FrogUI takes SW path
      * (no marker → use_hwdisp=0). */
-    /* FrogUI / panel-size core frames → HW path: driver.so does rotate90 + scale
-     * to native panel. filter 0 + aspect 0 = pure 1:1-rotate pass-through (proven
-     * good). The SW fb path below is SF3000-panel-specific (854x480 + fixed 90°
-     * transpose) and does NOT match the R36SX panel, so panel-size frames must go
-     * through the driver. Lazy-init here so cold-boot FrogUI also uses HW. */
-    if (src != screen->pixels && width == PANEL_W && height == PANEL_H) {
+    /* R36SX ONLY: panel-size core frames (FrogUI) → direct fb0 write (controller
+     * scales, panel is landscape-native so no rotation needed). SF3000's panel is
+     * portrait-mounted (needs 90° rotation) and its driver's disp_frame ABORTS on
+     * panel-size frames (only small game frames work), so SF3000 FrogUI falls
+     * through to the SW transpose path below (bilinear-blended, its proven cold
+     * renderer). */
+    if (sf3000_is_r36sx() && src != screen->pixels &&
+        width == PANEL_W && height == PANEL_H) {
         if (!sf3000_use_hwdisp && hwdisp_init() == 0) {
             sf3000_use_hwdisp = 1;
             fprintf(stderr, "sf3000_fb_blit: HW path active (panel-size)\n");
         }
-        if (sf3000_use_hwdisp) {
-            /* R36SX: hwdisp writes straight to fb0 (filter/aspect ignored).
-             * SF3000: filter 0 + aspect 0 = driver 1:1 rotate pass-through. */
-            hwdisp_set_filter(0);
-            hwdisp_set_target_aspect(0, 0);
-            hwdisp_present(src, width, height, pitch);
+        if (sf3000_use_hwdisp && hwdisp_present_direct(src, width, height, pitch))
             return;
-        }
     }
-    /* Always HW: init on first game frame regardless of filter. SW path kept
-     * only as fallback if HW init fails. */
-    if (!sf3000_use_hwdisp) {
+    /* Lazy-init HW: R36SX always (disp_frame hangs → fb-write for everything);
+     * SF3000 only on bilinear frames (nearest games take the SW path). */
+    if (!sf3000_use_hwdisp &&
+        (sf3000_is_r36sx() || scale_filter == SCALE_FILTER_BILINEAR)) {
         if (hwdisp_init() == 0) {
             sf3000_use_hwdisp = 1;
             fprintf(stderr, "sf3000_fb_blit: HW path active\n");
@@ -1647,12 +1656,15 @@ if (sf3000_use_hwdisp) {
                     }
                 }
                 sf3000_frame_limit();
-                hwdisp_present(compose_buf, width, height, width * 2);
+                /* R36SX: disp_frame hangs → direct fb0 write. SF3000: disp_frame. */
+                if (!(sf3000_is_r36sx() && hwdisp_present_direct(compose_buf, width, height, width * 2)))
+                    hwdisp_present(compose_buf, width, height, width * 2);
                 return;
             }
         }
         sf3000_frame_limit();
-        hwdisp_present(src, width, height, pitch);
+        if (!(sf3000_is_r36sx() && hwdisp_present_direct(src, width, height, pitch)))
+            hwdisp_present(src, width, height, pitch);
         return;
     }
     /* Re-assert display controller → fb0 page.

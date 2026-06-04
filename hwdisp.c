@@ -94,21 +94,42 @@ static void hwdisp_fb_open(void) {
         g_fbw, g_fbh, g_fbstride, vi.bits_per_pixel, g_fbsize);
 }
 
-/* Nearest-scale src(w×h RGB565) → full fb (g_fbw×g_fbh), write directly to fb0.
- * rotate:0 (landscape fb), so straight scale, no transpose. Returns 1 if drawn. */
+/* Write src(w×h RGB565) directly to fb0, nearest-scaled to fill it.
+ *   R36SX: landscape fb, rotate:0 → straight scale.
+ *   SF3000: panel is 480x854 portrait-mounted; the driver's disp_frame normally
+ *           rotates 90°, but we bypass it, so rotate the frame 90° CW here.
+ * Returns 1 if drawn. */
 static int hwdisp_fb_present(const void *src, int w, int h, int pitch_bytes) {
     if (!g_fbmem || g_fbw <= 0 || g_fbh <= 0 || w <= 0 || h <= 0) return 0;
+    extern int sf3000_is_r36sx(void);
     const int sp = pitch_bytes / 2;
     const uint16_t *s = (const uint16_t *)src;
-    /* Precompute x source map for the scale. */
+    int draw_w = g_fbw < 2048 ? g_fbw : 2048;
+
+    if (!sf3000_is_r36sx()) {
+        /* SF3000: 90° CW rotate. fb row → src x; fb col(reversed) → src y. */
+        static int symap[2048];
+        static int last_h = -1, last_fbw = -1;
+        if (h != last_h || g_fbw != last_fbw) {
+            for (int dx = 0; dx < draw_w; dx++) symap[dx] = (h - 1) - (dx * h / g_fbw);
+            last_h = h; last_fbw = g_fbw;
+        }
+        for (int dy = 0; dy < g_fbh; dy++) {
+            int sx = dy * w / g_fbh;
+            uint16_t *drow = g_fbmem + (size_t)dy * g_fbstride;
+            for (int dx = 0; dx < draw_w; dx++)
+                drow[dx] = s[(size_t)symap[dx] * sp + sx];
+        }
+        return 1;
+    }
+
+    /* R36SX: straight scale. */
     static int xmap[2048];
     static int last_w = -1, last_fbw = -1;
     if (w != last_w || g_fbw != last_fbw) {
-        int n = g_fbw < 2048 ? g_fbw : 2048;
-        for (int dx = 0; dx < n; dx++) xmap[dx] = dx * w / g_fbw;
+        for (int dx = 0; dx < draw_w; dx++) xmap[dx] = dx * w / g_fbw;
         last_w = w; last_fbw = g_fbw;
     }
-    int draw_w = g_fbw < 2048 ? g_fbw : 2048;
     for (int dy = 0; dy < g_fbh; dy++) {
         int sy = dy * h / g_fbh;
         const uint16_t *srow = s + sy * sp;
@@ -163,10 +184,7 @@ int hwdisp_init(void) {
     g_active = 1;
     fprintf(stderr, "hwdisp: HW path active (init rv=%d)\n", rv);
     sf3000_dump_fb_state("hwdisp_init/post");
-    /* R36SX: video_driver_disp_frame hangs — present by writing fb0 directly, so
-     * mmap it here. SF3000: disp_frame works; keep that path (no direct fb). */
-    if (sf3000_is_r36sx())
-        hwdisp_fb_open();
+    /* fb0 for direct presents is mmap'd lazily by hwdisp_present_direct(). */
     return 0;
 }
 
@@ -361,6 +379,22 @@ static void upscale_nearest(const void *src, int w, int h, int pitch_bytes) {
     }
 }
 
+/* Direct present: write the frame straight into fb0; the display controller
+ * scales fb0 → panel. Bypasses video_driver_disp_frame, which HANGS on R36SX
+ * and ABORTS on SF3000 panel-size input. Used for FrogUI (both devices) and all
+ * R36SX frames. Returns 1 if presented. */
+int hwdisp_present_direct(const void *src, int w, int h, int pitch_bytes) {
+    static int s_n = 0;
+    int lg = (s_n < 8);
+    s_n++;
+    if (!g_active || !src) return 0;
+    if (!g_fbmem) hwdisp_fb_open();
+    if (!g_fbmem) { if (lg) DBG("DBG present_direct#%d: no fb0\n", s_n); return 0; }
+    int ok = hwdisp_fb_present(src, w, h, pitch_bytes);
+    if (lg) DBG("DBG present_direct#%d: w=%d h=%d ok=%d fb=%dx%d\n", s_n, w, h, ok, g_fbw, g_fbh);
+    return ok;
+}
+
 void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {
     static int s_n = 0;
     int lg = (s_n < 8);
@@ -369,13 +403,6 @@ void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {
                 s_n, src, w, h, pitch_bytes, g_active, (void*)p_disp,
                 g_filter_nearest, g_aspect_num, g_aspect_den, HW_W, HW_H);
     if (!g_active || !src) { if (lg) DBG("DBG present#%d: EARLY-RET\n", s_n); return; }
-    /* Preferred path: write straight to fb0 (driver scaler → panel). Avoids the
-     * hanging video_driver_disp_frame entirely. */
-    if (g_fbmem) {
-        int ok = hwdisp_fb_present(src, w, h, pitch_bytes);
-        if (lg) DBG("DBG present#%d: fbwrite ok=%d fb=%dx%d\n", s_n, ok, g_fbw, g_fbh);
-        if (ok) return;
-    }
     if (!p_disp) { if (lg) DBG("DBG present#%d: no p_disp\n", s_n); return; }
     int rv;
     /* Nearest filter: SW upscale to 1280×720, driver does no further scale. */
