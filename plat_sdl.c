@@ -1299,6 +1299,9 @@ void sf3000_dump_fb_state(const char *tag) {
 }
 
 int sf3000_fb_init(void) {
+    /* Detect device + export panel geometry to env before the core's retro_init
+     * reads it (single binary → SF3000 854x480 or R36SX 640x480). */
+    { extern void sf3000_detect_device(void); sf3000_detect_device(); }
     /* Write per-process init log to dedicated file with fsync, so it
      * survives even when stderr buffer is lost on power-cycle. */
     int initlog = open("/mnt/sdcard/picoarch_init.log",
@@ -1506,19 +1509,45 @@ static void sf3000_frame_limit(void) {
     last_tv = tv;
 }
 
-/* Panel geometry: SF3000 854x480 16:9, R36SX 640x480 4:3 (set via Makefile -D). */
-#ifndef PANEL_W
-#define PANEL_W 854
-#endif
-#ifndef PANEL_H
-#define PANEL_H 480
-#endif
-#ifndef PANEL_ASPECT_NUM
-#define PANEL_ASPECT_NUM 16
-#endif
-#ifndef PANEL_ASPECT_DEN
-#define PANEL_ASPECT_DEN 9
-#endif
+/* Runtime device + panel detection (single binary supports both):
+ *   SF3000 — 854x480 16:9, driver_sf3000.so, present via video_driver_disp_frame
+ *   R36SX  — 640x480 4:3,  driver_r36sx.so,  present via direct fb0 write
+ * Detected once from the device-tree panel node (R36SX panel chip = r63311).
+ * Panel dims + UI scale are exported via env (TF_PANEL_W/H/UI_SCALE) so the
+ * FrogUI libretro core renders at the right resolution. */
+extern void dbg_log(const char *fmt, ...);
+static int g_dev_r36sx = -1;   /* -1 = undetected, 0 = SF3000, 1 = R36SX */
+static int g_dev_w = 854, g_dev_h = 480, g_dev_scale = 150;
+
+void sf3000_detect_device(void) {
+    if (g_dev_r36sx != -1) return;
+    int found = 0;
+    FILE *f = popen("grep -rlsi r63311 /proc/device-tree 2>/dev/null | head -1", "r");
+    if (f) {
+        char buf[128] = {0};
+        if (fgets(buf, sizeof buf, f) && buf[0] != '\0' && buf[0] != '\n') found = 1;
+        pclose(f);
+    }
+    g_dev_r36sx = found;
+    /* Both panels are 480 tall → same UI scale gives a consistent layout. */
+    if (found) { g_dev_w = 640; g_dev_h = 480; g_dev_scale = 150; }
+    else       { g_dev_w = 854; g_dev_h = 480; g_dev_scale = 150; }
+    char s[16];
+    snprintf(s, sizeof s, "%d", g_dev_w);     setenv("TF_PANEL_W", s, 1);
+    snprintf(s, sizeof s, "%d", g_dev_h);     setenv("TF_PANEL_H", s, 1);
+    snprintf(s, sizeof s, "%d", g_dev_scale); setenv("TF_UI_SCALE", s, 1);
+    dbg_log("DBG device: %s panel=%dx%d ui_scale=%d\n",
+            found ? "R36SX" : "SF3000", g_dev_w, g_dev_h, g_dev_scale);
+}
+
+int sf3000_panel_w(void)  { sf3000_detect_device(); return g_dev_w; }
+int sf3000_panel_h(void)  { sf3000_detect_device(); return g_dev_h; }
+int sf3000_is_r36sx(void) { sf3000_detect_device(); return g_dev_r36sx > 0; }
+
+#define PANEL_W (sf3000_panel_w())
+#define PANEL_H (sf3000_panel_h())
+#define PANEL_ASPECT_NUM (sf3000_is_r36sx() ? 4 : 16)
+#define PANEL_ASPECT_DEN (sf3000_is_r36sx() ? 3 : 9)
 
 void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
     {
@@ -1546,10 +1575,9 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
             fprintf(stderr, "sf3000_fb_blit: HW path active (panel-size)\n");
         }
         if (sf3000_use_hwdisp) {
-            /* R36SX driver native = 1280x720, rotate:0. Feed it a full native-size
-             * frame (SW-upscale src→1280x720), driver then scales to 640x480 panel.
-             * Panel-size (640x480) input alone presents black on this driver. */
-            hwdisp_set_filter(1);
+            /* R36SX: hwdisp writes straight to fb0 (filter/aspect ignored).
+             * SF3000: filter 0 + aspect 0 = driver 1:1 rotate pass-through. */
+            hwdisp_set_filter(0);
             hwdisp_set_target_aspect(0, 0);
             hwdisp_present(src, width, height, pitch);
             return;

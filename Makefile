@@ -74,10 +74,8 @@ else ifeq ($(platform), miyoomini)
 else ifeq ($(platform), sf3000)
 	OBJS += plat_sf3000.o hwdisp.o
 	CFLAGS += -mips32r2 -march=mips32r2 -mtune=24kc -mfp32 -mhard-float -DCONTENT_DIR='"/mnt/SDCARD/Roms"' -DUSE_C_SCALER -DPLATFORM_SF3000
-	# R36SX panel: 640x480 (4:3). Driver auto-scales source->fb on the default
-	# bilinear path; these only affect the SW nearest/integer pre-scale paths
-	# and the "preserve aspect" pillarbox target.
-	CFLAGS += -DPANEL_W=640 -DPANEL_H=480 -DHW_NATIVE_W=1280 -DHW_NATIVE_H=720 -DPANEL_ASPECT_NUM=4 -DPANEL_ASPECT_DEN=3
+	# Panel geometry is detected at runtime (SF3000 854x480 / R36SX 640x480) —
+	# see sf3000_detect_device() in plat_sdl.c. No compile-time panel defines.
 	LDFLAGS += -mips32r2 -march=mips32r2 -mtune=24kc -mfp32 -mhard-float -lpthread
 	# Disable LTO — breaks MIPS ABICALLS GP setup for static function pointers passed to PIC code
 	CFLAGS  := $(filter-out -flto,$(CFLAGS))

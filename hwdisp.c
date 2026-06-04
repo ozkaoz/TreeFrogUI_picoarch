@@ -124,11 +124,23 @@ int hwdisp_init(void) {
     if (g_active) return 0;
     sf3000_dump_fb_state("hwdisp_init/pre");
 
-    g_handle = dlopen("/mnt/sdcard/cubegm/driver.so", RTLD_NOW | RTLD_GLOBAL);
+    /* Device-specific driver: R36SX and SF3000 ship different driver.so builds
+     * (panel init + render behavior differ). Pick by detected device; fall back
+     * to a generic driver.so if the per-device file is absent. */
+    extern int sf3000_is_r36sx(void);
+    const char *drv = sf3000_is_r36sx()
+        ? "/mnt/sdcard/cubegm/driver_r36sx.so"
+        : "/mnt/sdcard/cubegm/driver_sf3000.so";
+    g_handle = dlopen(drv, RTLD_NOW | RTLD_GLOBAL);
+    if (!g_handle) {
+        DBG("DBG hwdisp: dlopen %s failed (%s), trying driver.so\n", drv, dlerror());
+        g_handle = dlopen("/mnt/sdcard/cubegm/driver.so", RTLD_NOW | RTLD_GLOBAL);
+    }
     if (!g_handle) {
         fprintf(stderr, "hwdisp: dlopen failed: %s\n", dlerror());
         return -1;
     }
+    DBG("DBG hwdisp: loaded %s\n", drv);
 
     p_init   = (fn_init_t)  dlsym(g_handle, "video_drivers_init");
     p_deinit = (fn_deinit_t)dlsym(g_handle, "video_driver_deinit");
@@ -151,8 +163,10 @@ int hwdisp_init(void) {
     g_active = 1;
     fprintf(stderr, "hwdisp: HW path active (init rv=%d)\n", rv);
     sf3000_dump_fb_state("hwdisp_init/post");
-    /* mmap fb0 at its post-init (driver-native) geometry for direct presents. */
-    hwdisp_fb_open();
+    /* R36SX: video_driver_disp_frame hangs — present by writing fb0 directly, so
+     * mmap it here. SF3000: disp_frame works; keep that path (no direct fb). */
+    if (sf3000_is_r36sx())
+        hwdisp_fb_open();
     return 0;
 }
 
