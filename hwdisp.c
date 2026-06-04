@@ -183,6 +183,17 @@ int hwdisp_init(void) {
 
     g_active = 1;
     fprintf(stderr, "hwdisp: HW path active (init rv=%d)\n", rv);
+
+    /* R36SX: enable the HCGE engine via video_driver_setmode so disp_frame's
+     * engine-sync doesn't hang (rkgame configures before presenting). disp_frame
+     * then HW-scales src→panel (no CPU upscale). Try a few mode args; logged
+     * fsync'd so a hang still tells us how far it got. */
+    if (sf3000_is_r36sx()) {
+        typedef int (*fn_setmode_t)(int, int);
+        fn_setmode_t p_setmode = (fn_setmode_t)dlsym(g_handle, "video_driver_setmode");
+        DBG("DBG hwdisp: setmode=%p calling setmode(0,0)\n", (void*)p_setmode);
+        if (p_setmode) { int sr = p_setmode(0, 0); DBG("DBG hwdisp: setmode(0,0) ret=%d\n", sr); }
+    }
     sf3000_dump_fb_state("hwdisp_init/post");
     /* fb0 for direct presents is mmap'd lazily by hwdisp_present_direct(). */
     return 0;
@@ -388,6 +399,14 @@ int hwdisp_present_direct(const void *src, int w, int h, int pitch_bytes) {
     int lg = (s_n < 8);
     s_n++;
     if (!g_active || !src) return 0;
+    /* HW path test: video_driver_disp_frame scales src→panel in HW (no CPU
+     * upscale). Logged fsync'd so a hang shows the last line. */
+    if (p_disp) {
+        if (lg) DBG("DBG present_direct#%d: pre disp_frame w=%d h=%d pitch=%d\n", s_n, w, h, pitch_bytes);
+        int rv = p_disp((void *)src, w, h, pitch_bytes);
+        if (lg) DBG("DBG present_direct#%d: post disp_frame rv=%d\n", s_n, rv);
+        return 1;
+    }
     if (!g_fbmem) hwdisp_fb_open();
     if (!g_fbmem) { if (lg) DBG("DBG present_direct#%d: no fb0\n", s_n); return 0; }
     int ok = hwdisp_fb_present(src, w, h, pitch_bytes);
