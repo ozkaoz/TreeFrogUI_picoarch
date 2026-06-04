@@ -394,24 +394,53 @@ static void upscale_nearest(const void *src, int w, int h, int pitch_bytes) {
  * scales fb0 → panel. Bypasses video_driver_disp_frame, which HANGS on R36SX
  * and ABORTS on SF3000 panel-size input. Used for FrogUI (both devices) and all
  * R36SX frames. Returns 1 if presented. */
+/* Panel scale mode for R36SX disp_frame present: 0=integer(NONE), 1=aspect, 2=full.
+ * disp_frame itself aspect-fits src→panel, so:
+ *   aspect → pass src straight (driver aspect-fits, bars).
+ *   full   → SW-stretch src into a 640x480 panel buffer → disp_frame 1:1 (fills).
+ *   integer→ SW integer-replicate src centered in 640x480 buffer → disp_frame 1:1. */
+#define PANEL_PW 640
+#define PANEL_PH 480
+static int g_panel_scale = 2;       /* default full */
+static uint16_t *g_panelbuf = NULL; /* 640x480 cached staging */
+void hwdisp_set_panel_scale(int m) { g_panel_scale = m; }
+
+static uint16_t *panel_build(const void *src, int w, int h, int pitch_bytes, int integer) {
+    if (!g_panelbuf) { g_panelbuf = (uint16_t*)malloc(PANEL_PW*PANEL_PH*2); if (!g_panelbuf) return NULL; }
+    const int sp = pitch_bytes/2; const uint16_t *s = (const uint16_t*)src;
+    if (integer) {
+        int n = PANEL_PW/w; int ny = PANEL_PH/h; if (ny<n) n=ny; if (n<1) n=1;
+        int dw=w*n, dh=h*n, ox=(PANEL_PW-dw)/2, oy=(PANEL_PH-dh)/2;
+        memset(g_panelbuf, 0, PANEL_PW*PANEL_PH*2);
+        for (int y=0; y<h; y++){ const uint16_t *sr=s+(size_t)y*sp;
+            for (int ry=0; ry<n; ry++){ uint16_t *dr=g_panelbuf+(size_t)(oy+y*n+ry)*PANEL_PW+ox;
+                for (int x=0;x<w;x++){ uint16_t px=sr[x]; for(int rx=0;rx<n;rx++) dr[x*n+rx]=px; } } }
+    } else { /* full stretch */
+        static int xm[PANEL_PW]; static int lw=-1;
+        if (w!=lw){ for(int x=0;x<PANEL_PW;x++) xm[x]=x*w/PANEL_PW; lw=w; }
+        for (int y=0;y<PANEL_PH;y++){ const uint16_t *sr=s+(size_t)(y*h/PANEL_PH)*sp;
+            uint16_t *dr=g_panelbuf+(size_t)y*PANEL_PW; for(int x=0;x<PANEL_PW;x++) dr[x]=sr[xm[x]]; }
+    }
+    return g_panelbuf;
+}
+
 int hwdisp_present_direct(const void *src, int w, int h, int pitch_bytes) {
     static int s_n = 0;
     int lg = (s_n < 8);
     s_n++;
-    if (!g_active || !src) return 0;
-    /* HW path test: video_driver_disp_frame scales src→panel in HW (no CPU
-     * upscale). Logged fsync'd so a hang shows the last line. */
-    if (p_disp) {
-        if (lg) DBG("DBG present_direct#%d: pre disp_frame w=%d h=%d pitch=%d\n", s_n, w, h, pitch_bytes);
-        int rv = p_disp((void *)src, w, h, pitch_bytes);
-        if (lg) DBG("DBG present_direct#%d: post disp_frame rv=%d\n", s_n, rv);
-        return 1;
+    if (!g_active || !src || !p_disp) return 0;
+    /* HW present: disp_frame HW-scales src→panel (no CPU upscale). For full/integer
+     * on game-size frames, pre-build a 640x480 panel buffer; aspect & panel-size
+     * (FrogUI) pass straight. */
+    const void *psrc = src; int pw = w, ph = h, ppitch = pitch_bytes;
+    if (!(w == PANEL_PW && h == PANEL_PH) && g_panel_scale != 1 /*aspect=straight*/) {
+        uint16_t *b = panel_build(src, w, h, pitch_bytes, g_panel_scale == 0);
+        if (b) { psrc = b; pw = PANEL_PW; ph = PANEL_PH; ppitch = PANEL_PW*2; }
     }
-    if (!g_fbmem) hwdisp_fb_open();
-    if (!g_fbmem) { if (lg) DBG("DBG present_direct#%d: no fb0\n", s_n); return 0; }
-    int ok = hwdisp_fb_present(src, w, h, pitch_bytes);
-    if (lg) DBG("DBG present_direct#%d: w=%d h=%d ok=%d fb=%dx%d\n", s_n, w, h, ok, g_fbw, g_fbh);
-    return ok;
+    if (lg) DBG("DBG present_direct#%d: pre disp_frame %dx%d scale=%d\n", s_n, pw, ph, g_panel_scale);
+    int rv = p_disp((void *)psrc, pw, ph, ppitch);
+    if (lg) DBG("DBG present_direct#%d: post rv=%d\n", s_n, rv);
+    return 1;
 }
 
 void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {

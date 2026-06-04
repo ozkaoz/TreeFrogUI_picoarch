@@ -1588,6 +1588,9 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
                     scale_filter, scale_size, sf3000_use_hwdisp, PANEL_W, PANEL_H);
         }
     }
+    /* R36SX: pass the user's scale-size choice (integer/aspect/full) to the HW
+     * present so disp_frame fills / aspect-fits / integer-scales accordingly. */
+    if (sf3000_is_r36sx()) hwdisp_set_panel_scale((int)scale_size);
     /* WARM-BOOT: hwdisp pre-init'd by sf3000_fb_init via marker file.
      * For FrogUI panel-size frames, force HW bilinear pass-through — only path
      * proven safe with panel-native input.  Cold-boot FrogUI takes SW path

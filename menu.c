@@ -542,10 +542,9 @@ static int mh_scale_size(int id, int keys) {
     (void)id;
     int dir = (keys & (PBTN_RIGHT|PBTN_R)) ? 1 : -1;
     int v = (int)scale_size + dir;
-    int skip_none = (scale_filter == SCALE_FILTER_BILINEAR);
-    if (skip_none && v == SCALE_SIZE_NONE) v += dir;
+    /* Integer/Aspect/Full all work via HW present now (any filter). */
     if (v < 0) v = SCALE_SIZE_FULL;
-    if (v > SCALE_SIZE_FULL) v = skip_none ? SCALE_SIZE_ASPECT : SCALE_SIZE_NONE;
+    if (v > SCALE_SIZE_FULL) v = SCALE_SIZE_NONE;
     scale_size = (enum scale_size)v;
     return 0;
 }
@@ -567,8 +566,7 @@ static menu_entry e_menu_video_options[] =
 
 	// only show effects on native scale
 static void menu_loop_video_prep(void) {
-	if (scale_filter == SCALE_FILTER_BILINEAR && scale_size == SCALE_SIZE_NONE)
-		scale_size = SCALE_SIZE_ASPECT;
+	/* Integer (NONE) works on the HW present regardless of filter — no reset. */
 	/* Filter is owned by FrogUI settings — hide from in-game menu. */
 	me_enable(e_menu_video_options, MA_VID_FILTER, false);
 	/* Screen size always visible; effects only meaningful in nearest. */

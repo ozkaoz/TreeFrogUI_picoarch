@@ -40,6 +40,9 @@ void hwdisp_present(const void *src, int w, int h, int pitch_bytes);
  * Returns 1 if presented, 0 if fb0 unavailable. */
 int hwdisp_present_direct(const void *src, int w, int h, int pitch_bytes);
 
+/* R36SX panel scale mode for disp_frame present: 0=integer, 1=aspect, 2=full. */
+void hwdisp_set_panel_scale(int mode);
+
 /* Present with TRUE panel-integer nearest scaling.
  * Internally: SW nearest-upscales src by N (largest integer where N*w<=854
  * and N*h<=480), centers in an 854x480 black panel buffer, sends to driver
