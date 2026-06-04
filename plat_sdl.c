@@ -1671,14 +1671,14 @@ if (sf3000_use_hwdisp) {
                         }
                     }
                 }
-                sf3000_frame_limit();
+                if (limit_frames) sf3000_frame_limit();  /* skip cap when fast-forwarding */
                 /* R36SX: disp_frame hangs → direct fb0 write. SF3000: disp_frame. */
                 if (!(sf3000_is_r36sx() && hwdisp_present_direct(compose_buf, width, height, width * 2)))
                     hwdisp_present(compose_buf, width, height, width * 2);
                 return;
             }
         }
-        sf3000_frame_limit();
+        if (limit_frames) sf3000_frame_limit();  /* skip cap when fast-forwarding */
         if (!(sf3000_is_r36sx() && hwdisp_present_direct(src, width, height, pitch)))
             hwdisp_present(src, width, height, pitch);
         return;

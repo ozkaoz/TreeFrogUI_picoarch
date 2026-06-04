@@ -542,6 +542,7 @@ static void pa_input_poll(void) {
 		const uint32_t START_BIT = (1u << 3);   /* START  = bit 3 */
 		const uint32_t L_BIT     = (1u << 10);  /* L1     = bit 10 */
 		const uint32_t R_BIT     = (1u << 11);  /* R1     = bit 11 */
+		const uint32_t Y_BIT     = (1u << 15);  /* Y      = bit 15 */
 
 		if ((raw & (SEL_BIT | START_BIT)) == (SEL_BIT | START_BIT))
 			handle_emu_action(EACTION_MENU);
@@ -549,6 +550,8 @@ static void pa_input_poll(void) {
 			handle_emu_action(EACTION_LOAD_STATE);
 		else if ((raw & (SEL_BIT | R_BIT)) == (SEL_BIT | R_BIT))
 			handle_emu_action(EACTION_SAVE_STATE);
+		else if ((raw & (SEL_BIT | Y_BIT)) == (SEL_BIT | Y_BIT))
+			handle_emu_action(EACTION_TOGGLE_FF);  /* SELECT+Y = toggle fast-forward */
 
 		buttons = sf3000_keys_to_buttons(raw);
 	} else {
@@ -686,6 +689,11 @@ int core_load_content(struct content *content) {
 	if (!strcmp(core_name, "fmsx") && current_core.retro_set_controller_port_device) {
 		/* fMSX works best with joypad + keyboard */
 		current_core.retro_set_controller_port_device(0, RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 0));
+	}
+	if (!strcmp(core_name, "fuse") && current_core.retro_set_controller_port_device) {
+		/* fuse defaults port 0 to the Cursor joystick; most ZX Spectrum games
+		 * expect Kempston. Force port 0 = Kempston (RETRO_DEVICE_JOYPAD subclass 1). */
+		current_core.retro_set_controller_port_device(0, RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 1));
 	}
 	if (!strcmp(core_name, "tyrquake") && current_core.retro_set_controller_port_device) {
 		/* tyrquake only applies its key bindings inside

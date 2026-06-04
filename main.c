@@ -732,6 +732,56 @@ static void get_tag_name(const char* in_path, char* out_tag) {
 	}
 }
 
+#ifdef PLATFORM_SF3000
+/* ---- Rewind: per-frame serialized-state ring. Hold SELECT+B to rewind. ----
+ * Each normal frame we serialize the core state into a ring. While rewinding we
+ * drop the newest slot and unserialize the now-newest, then retro_run() renders
+ * it (its +1 advance is discarded by the next step) → motion goes backward.
+ * Capped by a RAM budget; disabled for cores whose state is too big. */
+#define REWIND_BUDGET (16 * 1024 * 1024)
+#define REWIND_INTERVAL 6              /* capture every 6 frames (~10Hz) */
+static unsigned char *g_rw_buf  = NULL;
+static size_t         g_rw_ssize = 0;
+static int            g_rw_cap = 0, g_rw_head = 0, g_rw_count = 0;
+
+static void rewind_init(void) {
+	if (g_is_frogui || !current_core.retro_serialize_size) return;
+	size_t s = current_core.retro_serialize_size();
+	if (s == 0 || s > REWIND_BUDGET) return;
+	int cap = (int)(REWIND_BUDGET / s);
+	if (cap < 2) return;
+	if (cap > 1200) cap = 1200;          /* ~20s @60fps */
+	g_rw_buf = malloc((size_t)cap * s);
+	if (!g_rw_buf) return;
+	g_rw_ssize = s; g_rw_cap = cap; g_rw_head = 0; g_rw_count = 0;
+	DBG("DBG rewind: state=%zu cap=%d (%.1fs)\n", s, cap, cap / 60.0);
+}
+
+static void rewind_capture(void) {
+	if (!g_rw_buf) return;
+	if (current_core.retro_serialize(g_rw_buf + (size_t)g_rw_head * g_rw_ssize, g_rw_ssize)) {
+		g_rw_head = (g_rw_head + 1) % g_rw_cap;
+		if (g_rw_count < g_rw_cap) g_rw_count++;
+	}
+}
+
+static int rewind_back(void) {
+	if (!g_rw_buf || g_rw_count <= 1) return 0;
+	g_rw_head = (g_rw_head - 1 + g_rw_cap) % g_rw_cap;   /* drop newest */
+	g_rw_count--;
+	int slot = (g_rw_head - 1 + g_rw_cap) % g_rw_cap;    /* now-newest */
+	current_core.retro_unserialize(g_rw_buf + (size_t)slot * g_rw_ssize, g_rw_ssize);
+	return 1;
+}
+
+static int rewind_held(void) {
+	extern volatile uint32_t *sf3000_keys_ptr;
+	if (!sf3000_keys_ptr) return 0;
+	uint32_t r = *sf3000_keys_ptr;
+	return (r & ((1u << 0) | (1u << 14))) == ((1u << 0) | (1u << 14)); /* SELECT+B */
+}
+#endif
+
 int main(int argc, char **argv) {
 	setvbuf(stdout, NULL, _IONBF, 0);
 	setvbuf(stderr, NULL, _IONBF, 0);
@@ -862,11 +912,27 @@ int main(int argc, char **argv) {
 #endif
 	show_startup_message();
 	state_resume();
+#ifdef PLATFORM_SF3000
+	rewind_init();
+#endif
 
 	do {
 		count_fps();
 		adjust_audio();
+#ifdef PLATFORM_SF3000
+		if (g_rw_buf && rewind_held() && rewind_back()) {
+			current_core.retro_run();          /* render restored frame */
+		} else {
+			static int rw_fc = 0;
+			current_core.retro_run();
+			/* capture every REWIND_INTERVAL frames — per-frame serialize is too
+			 * heavy (chops audio) and drains the ring too fast. */
+			if (g_rw_buf && (++rw_fc % REWIND_INTERVAL) == 0)
+				rewind_capture();
+		}
+#else
 		current_core.retro_run();
+#endif
 		if (!should_quit)
 			plat_video_flip();
 	} while (!should_quit);
