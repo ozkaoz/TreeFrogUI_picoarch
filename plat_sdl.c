@@ -739,28 +739,38 @@ void plat_video_process(const void *data, unsigned width, unsigned height, size_
 	}
 
 	if (current_pixel_format == RETRO_PIXEL_FORMAT_XRGB8888) {
-		/* RGB8888 path: convert to 16-bit and blit. */
-		int x0 = ((int)SCREEN_WIDTH  - (int)width)  / 2;
-		int y0 = ((int)SCREEN_HEIGHT - (int)height) / 2;
-		if (x0 < 0) x0 = 0;
-		if (y0 < 0) y0 = 0;
-		memset(screen->pixels, 0, SCREEN_HEIGHT * (screen->pitch));
-		const uint32_t *src32 = (const uint32_t *)data;
-		for (unsigned y = 0; y < height && (y + y0) < SCREEN_HEIGHT; y++) {
-			const uint32_t *row = src32 + y * (pitch / 4);
-			uint16_t *dst = (uint16_t *)screen->pixels
-			                + (y + y0) * (screen->pitch / 2) + x0;
-			for (unsigned x = 0; x < width && (x + x0) < SCREEN_WIDTH; x++) {
-				uint32_t p = row[x];
-				uint8_t r = (p >> 16) & 0xFF;
-				uint8_t g = (p >>  8) & 0xFF;
-				uint8_t b = (p)       & 0xFF;
-				*dst++ = (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+		/* RGB8888 path: convert to a core-sized RGB565 buffer, then feed the
+		 * SAME blit path as native RGB565 cores so hwdisp scales core→panel
+		 * (honouring scale modes). The old code center-blitted 1:1 into a
+		 * panel-sized buffer, which cropped cores wider than the panel and
+		 * defeated scaling. */
+		static uint16_t *conv_buf = NULL;
+		static size_t conv_cap = 0;
+		size_t need = (size_t)width * height;
+		if (need > conv_cap) {
+			free(conv_buf);
+			conv_cap = need + 4096;
+			conv_buf = (uint16_t *)malloc(conv_cap * sizeof(uint16_t));
+		}
+		if (conv_buf) {
+			const uint32_t *src32 = (const uint32_t *)data;
+			for (unsigned y = 0; y < height; y++) {
+				const uint32_t *row = src32 + y * (pitch / 4);
+				uint16_t *dst = conv_buf + (size_t)y * width;
+				for (unsigned x = 0; x < width; x++) {
+					uint32_t p = row[x];
+					uint8_t r = (p >> 16) & 0xFF;
+					uint8_t g = (p >>  8) & 0xFF;
+					uint8_t b = (p)       & 0xFF;
+					dst[x] = (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+				}
 			}
 		}
+		g_game_w = (int)width; g_game_h = (int)height;
 		SDL_UnlockSurface(screen);
 		video_update_msg();
-		sf3000_fb_blit(screen->pixels, SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_WIDTH * 2);
+		if (conv_buf)
+			sf3000_fb_blit(conv_buf, (int)width, (int)height, (int)width * 2);
 		return;
 	}
 #endif
