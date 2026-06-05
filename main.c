@@ -162,51 +162,22 @@ static void sigsegv_handler(int sig, siginfo_t *si, void *ucv) {
 static uint32_t vsyncs;
 static uint32_t renders;
 
+/* Fast-forward speed level, cycled by SELECT+Y: 0=off, 1=2x, 2=3x.
+ * The frame limiter paces emulation at (level+1)*60fps and the SF3000/R36SX
+ * present skips to keep display at 60fps (see plat_sdl.c). Audio mutes while FF. */
+int g_ff_level = 0;
+
 static void toggle_fast_forward(int force_off)
 {
-	static int frameskip_style_was;
-	static int max_frameskip_was;
-	static int limit_frames_was;
-	static int enable_audio_was;
-	static int fast_forward;
-	const struct core_override *override = get_overrides();
+	static int enable_audio_was = 1;
 
-	if (force_off && !fast_forward)
+	if (force_off) {
+		if (g_ff_level) { g_ff_level = 0; enable_audio = enable_audio_was; }
 		return;
-
-	fast_forward = !fast_forward;
-
-	if (fast_forward) {
-		if (override && override->fast_forward) {
-			const char *type_key = override->fast_forward->type_key;
-			const char *interval_key = override->fast_forward->interval_key;
-
-			frameskip_style_was = options_get_value_index(type_key);
-			max_frameskip_was = options_get_value_index(interval_key);
-			options_set_value(
-				type_key,
-				CORE_OVERRIDE(override->fast_forward, type_value, "fixed_interval"));
-			options_set_value(
-				interval_key,
-				CORE_OVERRIDE(override->fast_forward, interval_value, "5"));
-		}
-
-		limit_frames_was = limit_frames;
-		enable_audio_was = enable_audio;
-		limit_frames = 0;
-		enable_audio = 0;
-	} else {
-		if (override && override->fast_forward) {
-			const char *type_key = override->fast_forward->type_key;
-			const char *interval_key = override->fast_forward->interval_key;
-
-			options_set_value_index(type_key, frameskip_style_was);
-			options_set_value_index(interval_key, max_frameskip_was);
-		}
-
-		limit_frames = limit_frames_was;
-		enable_audio = enable_audio_was;
 	}
+	if (g_ff_level == 0) enable_audio_was = enable_audio;  /* snapshot on entry */
+	g_ff_level = (g_ff_level + 1) % 3;                     /* off → 2x → 3x → off */
+	enable_audio = g_ff_level ? 0 : enable_audio_was;      /* mute while FF */
 }
 
 // static int screenshot_file_name(char *name, size_t len) {

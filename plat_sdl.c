@@ -1495,19 +1495,21 @@ static inline uint32_t cvt565(uint16_t c) {
 }
 
 static void sf3000_frame_limit(void) {
+    extern int g_ff_level;            /* 0=off,1=2x,2=3x */
+    long long target = 16666 / (g_ff_level + 1);   /* pace emulation faster on FF */
     static struct timeval last_tv = {0, 0};
     struct timeval tv;
     gettimeofday(&tv, NULL);
     if (last_tv.tv_sec != 0) {
         long long diff_us = (tv.tv_sec - last_tv.tv_sec) * 1000000LL + (tv.tv_usec - last_tv.tv_usec);
-        if (diff_us > 0 && diff_us < 16666) {
-            long long sleep_us = 16666 - diff_us;
+        if (diff_us > 0 && diff_us < target) {
+            long long sleep_us = target - diff_us;
             if (sleep_us > 2000)
                 usleep(sleep_us - 2000);
             while (1) {
                 gettimeofday(&tv, NULL);
                 diff_us = (tv.tv_sec - last_tv.tv_sec) * 1000000LL + (tv.tv_usec - last_tv.tv_usec);
-                if (diff_us >= 16666) break;
+                if (diff_us >= target) break;
             }
         }
     }
@@ -1622,6 +1624,16 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
 
 
 if (sf3000_use_hwdisp) {
+        /* Fast-forward: frame_limit paces emulation at (level+1)*60fps; here we
+         * present only 1 of (level+1) frames so the display stays 60fps and the
+         * game runs (level+1)x. frame_limit runs first (below) → paces every
+         * frame; this only skips the present. Game frames only (not FrogUI). */
+        extern int g_ff_level;
+        int ff_skip = 0;
+        if (g_ff_level && src != screen->pixels) {
+            static unsigned ff_ctr = 0;
+            if ((++ff_ctr) % (g_ff_level + 1)) ff_skip = 1;
+        }
         int aspect = (src == screen->pixels) || (scale_size != SCALE_SIZE_FULL);
         hwdisp_set_target_aspect(aspect ? PANEL_ASPECT_NUM : 0, aspect ? PANEL_ASPECT_DEN : 0);
         hwdisp_set_filter(0);   /* always HW bilinear (SW nearest path removed) */
@@ -1674,14 +1686,16 @@ if (sf3000_use_hwdisp) {
                         }
                     }
                 }
-                if (limit_frames) sf3000_frame_limit();  /* skip cap when fast-forwarding */
+                sf3000_frame_limit();   /* paces emulation (target scales with FF level) */
+                if (ff_skip) return;    /* FF: drop this present to keep display 60fps */
                 /* R36SX: disp_frame hangs → direct fb0 write. SF3000: disp_frame. */
                 if (!(sf3000_is_r36sx() && hwdisp_present_direct(compose_buf, width, height, width * 2)))
                     hwdisp_present(compose_buf, width, height, width * 2);
                 return;
             }
         }
-        if (limit_frames) sf3000_frame_limit();  /* skip cap when fast-forwarding */
+        sf3000_frame_limit();   /* paces emulation (target scales with FF level) */
+        if (ff_skip) return;    /* FF: drop this present to keep display 60fps */
         if (!(sf3000_is_r36sx() && hwdisp_present_direct(src, width, height, pitch)))
             hwdisp_present(src, width, height, pitch);
         return;
