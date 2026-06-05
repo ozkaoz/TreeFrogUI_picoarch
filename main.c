@@ -490,7 +490,7 @@ void handle_emu_action(emu_action action)
 		 * mid-game (game is paused while menu is up). */
 		if (g_auto_resume && !g_is_frogui) {
 			int prev = state_slot;
-			state_slot = 99;
+			state_slot = 9;  /* reserved auto-resume slot (10th) */
 			state_write();
 			state_slot = prev;
 			sync();
@@ -853,7 +853,7 @@ int main(int argc, char **argv) {
 			/* Always try slot 99 auto state on game launch when auto_resume
 			 * is on (boot redirect OR manual FrogUI launch).  state_resume
 			 * silently falls through if slot 99 file doesn't exist. */
-			resume_slot = 99;
+			resume_slot = 9;  /* reserved auto-resume slot (10th) */
 			DBG("DBG main: auto-resume → resume_slot=99\n");
 		}
 	}
@@ -919,7 +919,7 @@ int quit(int code) {
 	/* Final auto-resume save before unloading core. */
 	if (g_auto_resume && !g_is_frogui && current_core.retro_unload_game) {
 		int prev = state_slot;
-		state_slot = 99;
+		state_slot = 9;  /* reserved auto-resume slot (10th) */
 		state_write();
 		state_slot = prev;
 		sync();

@@ -2,6 +2,7 @@
 #include "core.h"
 #include "main.h"
 #include "menu.h"
+#include "menu_font.h"
 #include "options.h"
 #include "overrides.h"
 #include "plat.h"
@@ -108,6 +109,13 @@ static unsigned short fname2color(const char *fname)
 {
 	return 0xFFFF;
 }
+
+/* MinUI draw helpers — defined later in this file, but forward-declared here so
+ * the savestate menu (inside the libpicofe/menu.c included below) can use them. */
+static void minui_fill(int x, int y, int w, int h, uint16_t c);
+static void minui_border(int x, int y, int w, int h, int t, uint16_t c);
+static void minui_thumb(const uint16_t *src, int sw, int sh, int spp,
+                        int dx, int dy, int dw, int dh);
 
 #include "libpicofe/menu.c"
 
@@ -727,6 +735,127 @@ void menu_end(void)
 	drew_alt_bg = 0;
 }
 
+/* ------------------------- MinUI-style main pause menu ------------------------- */
+
+static void minui_game_title(char *out, size_t n) {
+	const char *p = (content && content->path[0]) ? content->path : "";
+	const char *base = strrchr(p, '/');
+	base = base ? base + 1 : p;
+	snprintf(out, n, "%s", base);
+	char *dot = strrchr(out, '.');
+	if (dot && dot != out) *dot = '\0';
+	if (!out[0]) snprintf(out, n, "picoarch");
+}
+
+static void minui_fill(int x, int y, int w, int h, uint16_t c) {
+	uint16_t *fb = (uint16_t *)g_menuscreen_ptr;
+	if (x < 0) { w += x; x = 0; }
+	if (y < 0) { h += y; y = 0; }
+	if (x + w > g_menuscreen_w) w = g_menuscreen_w - x;
+	if (y + h > g_menuscreen_h) h = g_menuscreen_h - y;
+	for (int j = 0; j < h; j++) {
+		uint16_t *r = fb + (size_t)(y + j) * g_menuscreen_pp + x;
+		for (int i = 0; i < w; i++) r[i] = c;
+	}
+}
+
+static void minui_border(int x, int y, int w, int h, int t, uint16_t c) {
+	minui_fill(x, y, w, t, c);
+	minui_fill(x, y + h - t, w, t, c);
+	minui_fill(x, y, t, h, c);
+	minui_fill(x + w - t, y, t, h, c);
+}
+
+/* Nearest-scale an RGB565 source into a box of g_menuscreen. */
+static void minui_thumb(const uint16_t *src, int sw, int sh, int spp,
+                        int dx, int dy, int dw, int dh) {
+	if (!src || sw <= 0 || sh <= 0) { minui_fill(dx, dy, dw, dh, 0x0000); return; }
+	uint16_t *fb = (uint16_t *)g_menuscreen_ptr;
+	for (int y = 0; y < dh; y++) {
+		int sy = y * sh / dh;
+		const uint16_t *srow = src + (size_t)sy * spp;
+		uint16_t *drow = fb + (size_t)(dy + y) * g_menuscreen_pp + dx;
+		for (int x = 0; x < dw; x++) drow[x] = srow[x * sw / dw];
+	}
+}
+
+static void minui_draw_main(menu_entry *menu, int sel) {
+	const uint16_t WHITE = 0xFFFF, DARK = 0x0000;
+	int W = g_menuscreen_w, H = g_menuscreen_h;
+	int pad = W / 20;
+	int rh  = me_mfont_h;                   /* 36 — matches FrogUI ITEM_HEIGHT */
+	int tdy = (rh - MENU_TTF_PX) / 2;       /* vertical text centering in a row */
+
+	menu_draw_begin(1, 0);                  /* darkened game frame as background */
+	menu_font_set_px((float)MENU_TTF_PX);
+
+	char title[128];
+	minui_game_title(title, sizeof(title));
+	menu_font_draw_text((uint16_t *)g_menuscreen_ptr, W, H, pad, pad + tdy, title, WHITE);
+
+	/* thumbnail box (right) = bright captured frame */
+	int tw = (W * 42) / 100, th = (tw * 3) / 4;
+	int tx = W - tw - pad, ty = pad + rh + rh / 2;
+	minui_thumb((const uint16_t *)g_menubg_src_ptr, g_menubg_src_w, g_menubg_src_h,
+	            g_menubg_src_pp, tx, ty, tw, th);
+	minui_border(tx - 3, ty - 3, tw + 6, th + 6, 3, WHITE);
+
+	/* item list (left), highlight the selected entry with a rounded white pill */
+	int ly = pad + rh * 2;
+	int barw = tx - (pad - 6) - pad / 2;
+	for (menu_entry *e = menu; e->name; e++) {
+		if (!e->enabled) continue;
+		int idx = (int)(e - menu);
+		if (idx == sel) {
+			menu_round_fill(pad - 6, ly, barw, rh, rh / 4, WHITE);
+			menu_font_draw_text((uint16_t *)g_menuscreen_ptr, W, H, pad, ly + tdy, e->name, DARK);
+		} else {
+			menu_font_draw_text((uint16_t *)g_menuscreen_ptr, W, H, pad, ly + tdy, e->name, WHITE);
+		}
+		ly += rh;
+	}
+
+	const char *leg = "B-BACK   A-OKAY";
+	int lw = menu_font_measure(leg);
+	menu_font_draw_text((uint16_t *)g_menuscreen_ptr, W, H, W - lw - pad, H - rh + tdy, leg, WHITE);
+
+	menu_draw_end();
+}
+
+static int minui_main_loop(menu_entry *menu, int *menu_sel) {
+	int ret = 0, inp, sel = *menu_sel, smax = me_count(menu) - 1;
+	if (smax < 0) return 0;
+	while ((!menu[sel].enabled || !menu[sel].selectable) && sel < smax) sel++;
+
+	minui_draw_main(menu, sel);
+	while (in_menu_wait_any(NULL, 50) & (PBTN_MOK | PBTN_MBACK | PBTN_MENU))
+		;
+
+	for (;;) {
+		minui_draw_main(menu, sel);
+		inp = in_menu_wait(PBTN_UP | PBTN_DOWN | PBTN_MOK | PBTN_MBACK | PBTN_MENU, NULL, 70);
+		if (inp & (PBTN_MENU | PBTN_MBACK))
+			break;
+		if (inp & PBTN_UP) {
+			do { sel--; if (sel < 0) sel = smax; }
+			while (!menu[sel].enabled || !menu[sel].selectable);
+		}
+		if (inp & PBTN_DOWN) {
+			do { sel++; if (sel > smax) sel = 0; }
+			while (!menu[sel].enabled || !menu[sel].selectable);
+		}
+		if (inp & PBTN_MOK) {
+			if (menu[sel].handler) {
+				ret = menu[sel].handler(menu[sel].id, inp);
+				if (ret) break;
+				smax = me_count(menu) - 1;   /* enables may have changed */
+			}
+		}
+	}
+	*menu_sel = sel;
+	return ret;
+}
+
 void menu_loop(void)
 {
 	static int sel = 0;
@@ -754,7 +883,7 @@ void menu_loop(void)
 		me_enable(e_menu_main, MA_MAIN_LOAD_STATE, mmenu == NULL);
 	}
 #endif
-	me_loop(e_menu_main, &sel);
+	minui_main_loop(e_menu_main, &sel);
 
 	/* wait until menu, ok, back is released */
 	while (in_menu_wait_any(NULL, 50) & (PBTN_MENU|PBTN_MOK|PBTN_MBACK))
@@ -768,6 +897,9 @@ void menu_loop(void)
 int menu_init(void)
 {
 	menu_init_base();
+
+	/* Load FrogUI's TTF for the menu (no-op + bitmap fallback if unavailable). */
+	menu_font_init((float)MENU_TTF_PX);
 
 	g_menubg_src_ptr = calloc(g_menubg_src_pp * g_menubg_src_h, sizeof(uint16_t));
 	g_menubg_ptr = calloc(g_menuscreen_w * g_menuscreen_pp, sizeof(uint16_t));

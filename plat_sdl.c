@@ -624,20 +624,29 @@ int plat_load_screen(const char *filename, void *buf, size_t buf_size, int *w, i
 	if (!imgsurface)
 		goto finish;
 
-	surface = SDL_DisplayFormat(imgsurface);
+	/* Convert to RGB565 explicitly. SDL_DisplayFormat needs an initialised video
+	 * mode (we never SetVideoMode on SF3000), so it would fail or yield 24bpp. */
+	{
+		SDL_PixelFormat fmt;
+		memset(&fmt, 0, sizeof(fmt));
+		fmt.BitsPerPixel = 16;
+		fmt.BytesPerPixel = 2;
+		fmt.Rmask = 0xF800; fmt.Gmask = 0x07E0; fmt.Bmask = 0x001F; fmt.Amask = 0;
+		fmt.Rshift = 11; fmt.Gshift = 5; fmt.Bshift = 0;
+		fmt.Rloss = 3; fmt.Gloss = 2; fmt.Bloss = 3;
+		surface = SDL_ConvertSurface(imgsurface, &fmt, SDL_SWSURFACE);
+	}
 	if (!surface)
 		goto finish;
 
-	if (surface->pitch > SCREEN_PITCH ||
-	    surface->h > SCREEN_HEIGHT ||
-	    surface->w == 0 ||
-	    surface->h * surface->pitch > buf_size)
+	if (surface->w == 0 ||
+	    (size_t)(surface->h * surface->pitch) > buf_size)
 		goto finish;
 
 	memcpy(buf, surface->pixels, surface->pitch * surface->h);
 	*w = surface->w;
 	*h = surface->h;
-	*bpp = surface->pitch / surface->w;
+	*bpp = 2;
 
 	ret = 0;
 
@@ -650,11 +659,39 @@ finish:
 }
 
 
+#ifdef PLATFORM_SF3000
+/* Last presented frame as RGB565, captured for the menu background + the
+ * per-savestate screenshot (the HW path never writes screen->pixels on SF3000). */
+static const uint16_t *g_last565 = NULL;
+static int g_last565_w = 0, g_last565_h = 0, g_last565_pitch = 0; /* pitch in bytes */
+/* Nearest-scale the last presented game frame into the menu-bg buffer so the menu
+ * background + saved screenshot (plat_dump_screen reads g_menubg_src_ptr) show the
+ * game. The HW path never writes screen->pixels here, so we capture g_last565. */
+static void sf3000_capture_menubg(void)
+{
+	uint16_t *dst = (uint16_t *)g_menubg_src_ptr;
+	int dw = g_menubg_src_w, dh = g_menubg_src_h;
+	if (!dst) return;
+	if (!g_last565 || g_last565_w <= 0 || g_last565_h <= 0) {
+		memset(dst, 0, (size_t)dh * g_menubg_src_pp * sizeof(uint16_t));
+		return;
+	}
+	int sp = g_last565_pitch / 2;
+	for (int y = 0; y < dh; y++) {
+		int sy = y * g_last565_h / dh;
+		const uint16_t *srow = g_last565 + (size_t)sy * sp;
+		uint16_t *drow = dst + (size_t)y * g_menubg_src_pp;
+		for (int x = 0; x < dw; x++)
+			drow[x] = srow[x * g_last565_w / dw];
+	}
+}
+#endif
+
 void plat_video_menu_enter(int is_rom_loaded)
 {
 	SDL_LockSurface(screen);
 #ifdef PLATFORM_SF3000
-	memset(g_menubg_src_ptr, 0, g_menubg_src_h * g_menubg_src_pp * sizeof(uint16_t));
+	sf3000_capture_menubg();
 	memset(screen->pixels, 0, screen->h * screen->pitch);
 #else
 	memcpy(g_menubg_src_ptr, screen->pixels, g_menubg_src_h * g_menubg_src_pp * sizeof(uint16_t));
@@ -732,6 +769,8 @@ void plat_video_process(const void *data, unsigned width, unsigned height, size_
 	if (current_pixel_format != RETRO_PIXEL_FORMAT_XRGB8888) {
 		/* RGB565 / 0RGB1555: blit directly to fb0 (pitch may be wider than width*2). */
 		g_game_w = (int)width; g_game_h = (int)height;
+		g_last565 = (const uint16_t *)data; g_last565_w = (int)width;
+		g_last565_h = (int)height; g_last565_pitch = (int)pitch;
 		SDL_UnlockSurface(screen);
 		video_update_msg();
 		sf3000_fb_blit(data, (int)width, (int)height, (int)pitch);
@@ -767,6 +806,10 @@ void plat_video_process(const void *data, unsigned width, unsigned height, size_
 			}
 		}
 		g_game_w = (int)width; g_game_h = (int)height;
+		if (conv_buf) {
+			g_last565 = conv_buf; g_last565_w = (int)width;
+			g_last565_h = (int)height; g_last565_pitch = (int)width * 2;
+		}
 		SDL_UnlockSurface(screen);
 		video_update_msg();
 		if (conv_buf)
