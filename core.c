@@ -537,6 +537,7 @@ static void pa_input_poll(void) {
 
 	if (sf3000_keys_ptr) {
 		uint32_t raw = *sf3000_keys_ptr;
+		static uint32_t prev_raw = 0;   /* for rising-edge combo detection */
 
 		const uint32_t SEL_BIT   = (1u << 0);   /* SELECT = bit 0 */
 		const uint32_t START_BIT = (1u << 3);   /* START  = bit 3 */
@@ -544,15 +545,21 @@ static void pa_input_poll(void) {
 		const uint32_t R_BIT     = (1u << 11);  /* R1     = bit 11 */
 		const uint32_t Y_BIT     = (1u << 15);  /* Y      = bit 15 */
 
-		if ((raw & (SEL_BIT | START_BIT)) == (SEL_BIT | START_BIT))
+		/* Fire each combo only on the rising edge (newly fully-pressed this poll),
+		 * else it repeats every frame held — e.g. fast-forward toggling on/off
+		 * many times per press. */
+		#define COMBO_EDGE(m) (((raw & (m)) == (m)) && ((prev_raw & (m)) != (m)))
+		if (COMBO_EDGE(SEL_BIT | START_BIT))
 			handle_emu_action(EACTION_MENU);
-		else if ((raw & (SEL_BIT | L_BIT)) == (SEL_BIT | L_BIT))
+		else if (COMBO_EDGE(SEL_BIT | L_BIT))
 			handle_emu_action(EACTION_LOAD_STATE);
-		else if ((raw & (SEL_BIT | R_BIT)) == (SEL_BIT | R_BIT))
+		else if (COMBO_EDGE(SEL_BIT | R_BIT))
 			handle_emu_action(EACTION_SAVE_STATE);
-		else if ((raw & (SEL_BIT | Y_BIT)) == (SEL_BIT | Y_BIT))
-			handle_emu_action(EACTION_TOGGLE_FF);  /* SELECT+Y = toggle fast-forward */
+		else if (COMBO_EDGE(SEL_BIT | Y_BIT))
+			handle_emu_action(EACTION_TOGGLE_FF);  /* SELECT+Y = cycle fast-forward */
+		#undef COMBO_EDGE
 
+		prev_raw = raw;
 		buttons = sf3000_keys_to_buttons(raw);
 	} else {
 		buttons = actions[IN_BINDTYPE_PLAYER12];
