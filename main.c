@@ -717,6 +717,13 @@ static int            g_rw_cap = 0, g_rw_head = 0, g_rw_count = 0;
 
 static void rewind_init(void) {
 	if (g_is_frogui || !current_core.retro_serialize_size) return;
+	/* picodrive's retro_serialize writes more than retro_serialize_size() reports,
+	 * overflowing the rewind ring → heap corruption (hang/black after a few
+	 * frames). Disable rewind for it until that's addressed upstream. */
+	if (core_name[0] && strstr(core_name, "picodrive")) {
+		DBG("DBG rewind: disabled for picodrive (serialize size unreliable)\n");
+		return;
+	}
 	size_t s = current_core.retro_serialize_size();
 	if (s == 0 || s > REWIND_BUDGET) return;
 	int cap = (int)(REWIND_BUDGET / s);
