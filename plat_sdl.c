@@ -55,11 +55,15 @@ static SDLKey sf3000_retro_to_sdlkey(int retro_id) {
 }
 
 static void *sf3000_input_thread_fn(void *unused) {
-    uint32_t prev = 0;
+    uint32_t prev = 0, last = 0;
     while (1) {
         usleep(16000);
         if (!sf3000_keys_ptr) continue;
         uint32_t cur = *sf3000_keys_ptr & 0xFFFF;
+        /* Debounce: only act on a state that's stable for 2 polls (~32ms). Filters
+         * transient cubevol shmem glitches that otherwise inject phantom presses
+         * (e.g. a stray B → menu "back"). */
+        if (cur != last) { last = cur; continue; }
         uint32_t changed = cur ^ prev;
         if (!changed) continue;
         for (int i = 0; i < sf3000_keymap_count; i++) {
