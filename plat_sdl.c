@@ -1709,11 +1709,19 @@ if (sf3000_use_hwdisp) {
                 for (int y = 0; y < height; y++)
                     memcpy(compose_buf + (size_t)y * width, s + (size_t)y * sp, (size_t)width * 2);
 
-                /* Render msg at top-left using fontdata8x8 (2× scale). */
+                /* Render msg at top-left using fontdata8x8. The buffer is the
+                 * game's native res and gets upscaled to the panel, so a fixed
+                 * scale looks huge on low-res cores. Scale with buffer height so
+                 * the on-panel size stays ~constant (≈ the menu font). */
                 int len = 0; while (msg[len]) len++;
-                int tx = 4, ty = 4, ts = 2;
+                /* The HUD msg is space-padded to a fixed width (fps left / cpu
+                 * right), so size the bar to the last non-space glyph — otherwise
+                 * it stretches across the whole screen. */
+                int vis = len; while (vis > 0 && msg[vis-1] == ' ') vis--;
+                int ts = height / 120; if (ts < 1) ts = 1;
+                int tx = 4, ty = 4;
                 /* Background bar */
-                int bw = len * 8 * ts + 4;
+                int bw = vis * 8 * ts + 4;
                 int bh = 8 * ts + 4;
                 for (int by = 0; by < bh && (ty + by) < height; by++) {
                     uint16_t *r = compose_buf + (size_t)(ty + by) * width + tx;
