@@ -10,7 +10,7 @@ SDL_CONFIG="${SYSROOT}/usr/bin-o32/sdl-config"
 [ -x "${SDL_CONFIG}" ] || { echo "sdl-config not found: ${SDL_CONFIG}"; exit 1; }
 
 SDL_CFLAGS=$(${SDL_CONFIG} --cflags)
-CC_FLAGS="-mips32r2 -march=mips32r2 -mtune=24kc -mfp32 -mhard-float -mlong-calls -EL"
+CC_FLAGS="-mips32r2 -march=mips32r2 -mtune=74kc -mdspr2 -mfp32 -mhard-float -mlong-calls -EL"
 
 # Clean only picoarch objects (not cores). Include hwdisp.o
 rm -f libpicofe/input.o libpicofe/in_sdl.o libpicofe/linux/in_evdev.o \
