@@ -676,17 +676,28 @@ static void sf3000_capture_menubg(void)
 	uint16_t *dst = (uint16_t *)g_menubg_src_ptr;
 	int dw = g_menubg_src_w, dh = g_menubg_src_h;
 	if (!dst) return;
-	if (!g_last565 || g_last565_w <= 0 || g_last565_h <= 0) {
-		memset(dst, 0, (size_t)dh * g_menubg_src_pp * sizeof(uint16_t));
+	/* clear to black first so unfilled bars match the game's letterbox */
+	memset(dst, 0, (size_t)dh * g_menubg_src_pp * sizeof(uint16_t));
+	if (!g_last565 || g_last565_w <= 0 || g_last565_h <= 0)
 		return;
+	int sw = g_last565_w, sh = g_last565_h, sp = g_last565_pitch / 2;
+	/* Match how the game was displayed: FULL stretches to fill; every other
+	 * mode keeps the game's aspect (letterbox/pillarbox) so the menu background
+	 * lines up with the last gameplay frame for a smooth transition. */
+	int ox = 0, oy = 0, ow = dw, oh = dh;
+	if (scale_size != SCALE_SIZE_FULL) {
+		if ((long)dw * sh > (long)dh * sw) { oh = dh; ow = (int)((long)sw * dh / sh); }
+		else                               { ow = dw; oh = (int)((long)sh * dw / sw); }
+		if (ow > dw) ow = dw;
+		if (oh > dh) oh = dh;
+		ox = (dw - ow) / 2; oy = (dh - oh) / 2;
 	}
-	int sp = g_last565_pitch / 2;
-	for (int y = 0; y < dh; y++) {
-		int sy = y * g_last565_h / dh;
+	for (int y = 0; y < oh; y++) {
+		int sy = y * sh / oh;
 		const uint16_t *srow = g_last565 + (size_t)sy * sp;
-		uint16_t *drow = dst + (size_t)y * g_menubg_src_pp;
-		for (int x = 0; x < dw; x++)
-			drow[x] = srow[x * g_last565_w / dw];
+		uint16_t *drow = dst + (size_t)(oy + y) * g_menubg_src_pp + ox;
+		for (int x = 0; x < ow; x++)
+			drow[x] = srow[x * sw / ow];
 	}
 }
 #endif
