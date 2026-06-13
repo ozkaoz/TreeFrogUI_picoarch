@@ -780,7 +780,12 @@ static void minui_thumb(const uint16_t *src, int sw, int sh, int spp,
 }
 
 static void minui_draw_main(menu_entry *menu, int sel) {
-	const uint16_t WHITE = 0xFFFF, DARK = 0x0000;
+	/* Colours come from skin.txt (written by FrogUI from the active theme):
+	 * TEXT = theme select-text, PILL = theme select-bg. */
+	extern int menu_text_color, menu_sel_color, menu_sel_text_color;
+	const uint16_t WHITE = (uint16_t)menu_text_color;                       /* item/title text */
+	const uint16_t PILL  = (menu_sel_color >= 0) ? (uint16_t)menu_sel_color : 0xFFFF; /* selection pill */
+	const uint16_t DARK  = (uint16_t)menu_sel_text_color;                   /* selected text on pill */
 	int W = g_menuscreen_w, H = g_menuscreen_h;
 	int pad = W / 20;
 	int rh  = me_mfont_h;                   /* 36 — matches FrogUI ITEM_HEIGHT */
@@ -807,7 +812,7 @@ static void minui_draw_main(menu_entry *menu, int sel) {
 		if (!e->enabled) continue;
 		int idx = (int)(e - menu);
 		if (idx == sel) {
-			menu_round_fill(pad - 6, ly, barw, rh, rh / 4, WHITE);
+			menu_round_fill(pad - 6, ly, barw, rh, rh / 4, PILL);
 			menu_font_draw_text((uint16_t *)g_menuscreen_ptr, W, H, pad, ly + tdy, e->name, DARK);
 		} else {
 			menu_font_draw_text((uint16_t *)g_menuscreen_ptr, W, H, pad, ly + tdy, e->name, WHITE);

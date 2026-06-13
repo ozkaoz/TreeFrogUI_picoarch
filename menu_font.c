@@ -9,8 +9,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
-#include <dirent.h>
 
 static stbtt_fontinfo font_info;
 static unsigned char *font_buffer = NULL;
@@ -50,50 +48,10 @@ static int load_font_file(const char *fname) {
     return 1;
 }
 
-/* Read the user's font choice from FrogUI's settings.txt (font=<display name>),
- * then find a .ttf/.otf in the FrogUI font dirs whose name starts with it, so the
- * picoarch menu uses the same font the launcher does. */
-static int load_user_font(void) {
-    char want[96] = {0};
-    FILE *f = fopen("/mnt/sdcard/frogui/settings.txt", "r");
-    if (f) {
-        char line[160];
-        while (fgets(line, sizeof(line), f)) {
-            if (strncmp(line, "font=", 5) == 0) {
-                size_t n = strcspn(line + 5, "\r\n");
-                if (n >= sizeof(want)) n = sizeof(want) - 1;
-                memcpy(want, line + 5, n); want[n] = 0;
-                break;
-            }
-        }
-        fclose(f);
-    }
-    if (!want[0]) return 0;
-    const char *dirs[2] = { "/mnt/sdcard/frogui/fonts", "/mnt/sdcard/cubegm/fonts" };
-    for (int d = 0; d < 2; d++) {
-        DIR *dp = opendir(dirs[d]);
-        if (!dp) continue;
-        struct dirent *e;
-        while ((e = readdir(dp))) {
-            const char *dot = strrchr(e->d_name, '.');
-            if (!dot || (strcasecmp(dot, ".ttf") && strcasecmp(dot, ".otf"))) continue;
-            if (strncasecmp(e->d_name, want, strlen(want)) == 0) {
-                int ok = load_font_file(e->d_name);
-                closedir(dp);
-                if (ok) return 1;
-                break;
-            }
-        }
-        closedir(dp);
-    }
-    return 0;
-}
-
 int menu_font_init(float pixel_height) {
     if (pixel_height > 0) font_px = pixel_height;
     if (font_loaded) return 1;
-    /* user's chosen font (settings.txt), then FrogUI default, then fallback */
-    if (load_user_font()) return 1;
+    /* FrogUI's default font first, then monogram as fallback. */
     if (load_font_file("GamePocket-Regular-ZeroKern.ttf")) return 1;
     if (load_font_file("monogram.ttf")) return 1;
     return 0;
