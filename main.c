@@ -985,8 +985,10 @@ int main(int argc, char **argv) {
 			plat_video_flip();
 	} while (!should_quit);
 
-	if (!g_is_frogui)   /* don't count time spent in the menu */
+	if (!g_is_frogui) {   /* don't count time spent in the menu */
 		playtime_add(content_path, playtime_mono() - play_start);
+		save_game_screenshot();   /* per-game "last screen" for recents/switcher art */
+	}
 
 	return quit(0);
 }

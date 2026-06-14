@@ -124,6 +124,15 @@ void state_file_name(char *name, size_t size, int slot) {
 	content_based_name(content, name, MAX_PATH, config_dir, NULL, extension);
 }
 
+/* Per-game "last screen" snapshot (<base>.scr.bmp) for the recents/switcher art,
+ * even when there's no box art or save state. */
+void save_game_screenshot(void) {
+	if (!content) return;   /* caller (main) already skips this for FrogUI */
+	char name[MAX_PATH];
+	content_based_name(content, name, MAX_PATH, config_dir, NULL, ".scr");
+	plat_dump_screen(name);   /* writes name + ".bmp" */
+}
+
 int state_read(void) {
 	char filename[MAX_PATH];
 	FILE *state_file = NULL;
