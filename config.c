@@ -24,6 +24,8 @@ static const struct {
 } config_data[] = {
 	CE_NUM(show_fps),
 	CE_NUM(show_cpu),
+	CE_NUM(ff_enabled),
+	CE_NUM(rewind_enabled),
 	CE_NUM(limit_frames),
 	CE_NUM(audio_buffer_size),
 	CE_NUM(scale_size),

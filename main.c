@@ -176,6 +176,7 @@ static void toggle_fast_forward(int force_off)
 		if (g_ff_level) { g_ff_level = 0; enable_audio = enable_audio_was; }
 		return;
 	}
+	if (!ff_enabled) return;   /* per-core: fast-forward off */
 	if (g_ff_level == 0) enable_audio_was = enable_audio;  /* snapshot on entry */
 	g_ff_level = (g_ff_level + 1) % 3;                     /* off → 2x → 3x → off */
 	enable_audio = g_ff_level ? 0 : enable_audio_was;      /* mute while FF */
@@ -337,6 +338,8 @@ void set_defaults(void)
 	show_hud = 1;
 	limit_frames = 1;
 	enable_audio = 1;
+	ff_enabled = 0;       /* off by default; enable per-core in the menu */
+	rewind_enabled = 0;   /* off by default; reserves RAM + slows frames when on */
 	audio_buffer_size = 5;
 	scale_size = SCALE_SIZE_ASPECT;  /* default: aspect — integer & full are slower on the HW scaler */
 	scale_filter = SCALE_FILTER_NEAREST;
@@ -717,7 +720,7 @@ static size_t         g_rw_ssize = 0;
 static int            g_rw_cap = 0, g_rw_head = 0, g_rw_count = 0;
 
 static void rewind_init(void) {
-	if (g_is_frogui || !current_core.retro_serialize_size) return;
+	if (g_is_frogui || !rewind_enabled || !current_core.retro_serialize_size) return;
 	/* picodrive's retro_serialize writes more than retro_serialize_size() reports,
 	 * overflowing the rewind ring → heap corruption (hang/black after a few
 	 * frames). Disable rewind for it until that's addressed upstream. */

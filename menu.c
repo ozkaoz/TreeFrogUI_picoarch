@@ -496,6 +496,8 @@ static const char h_restore_def[]     = "Switches back to default settings";
 
 static const char h_show_fps[]        = "Shows frames and vsyncs per second";
 static const char h_show_cpu[]        = "Shows CPU usage";
+static const char h_ff_enabled[]      = "Allow fast-forward (SELECT+Y). Off by default.";
+static const char h_rewind_enabled[]  = "Allow rewind (hold SELECT+B). Uses RAM and slows frames; off by default.";
 
 static const char h_audio_buffer_size[]        =
 	"The size of the audio buffer, in frames. Higher\n"
@@ -562,6 +564,8 @@ static menu_entry e_menu_video_options[] =
 {
 	mee_onoff_h      ("Show FPS",                 0, show_fps, 1, h_show_fps),
 	mee_onoff_h      ("Show CPU %",               0, show_cpu, 1, h_show_cpu),
+	mee_onoff_h      ("Fast forward (SELECT+Y)",  0, ff_enabled, 1, h_ff_enabled),
+	mee_onoff_h      ("Rewind (hold SELECT+B)",   0, rewind_enabled, 1, h_rewind_enabled),
 	mee_cust_s_h     ("Screen size", MA_VID_SCALE_SIZE, 1, mh_scale_size, mgn_scale_size, h_scale_size),
 	mee_enum_h       ("Filter",        MA_VID_FILTER, scale_filter, men_scale_filter, NULL),
 	// mee_range_h      ("Max upscale",              0, max_upscale, 1, 8, h_max_upscale),
