@@ -764,14 +764,18 @@ static int rewind_held(void) {
 int main(int argc, char **argv) {
 	setvbuf(stdout, NULL, _IONBF, 0);
 	setvbuf(stderr, NULL, _IONBF, 0);
-	/* driver.so re-inits HCGE/fb/gpio on every menu open and leaks fds; raise
-	 * the limit so a play session can't exhaust it (save state was failing with
-	 * "Too many open files" → freeze). */
+	/* The device launches us with a very low open-file limit (~16). Steady state
+	 * is ~14 fds, so saving a state (state file + screenshot BMP) tips it over →
+	 * "Too many open files" → freeze. Raise it. Try hard+soft to 8192 (works as
+	 * root); fall back to raising soft up to the hard cap. */
 	{
 		struct rlimit rl;
 		if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
-			rl.rlim_cur = (rl.rlim_max > 8192 || rl.rlim_max == RLIM_INFINITY) ? 8192 : rl.rlim_max;
-			setrlimit(RLIMIT_NOFILE, &rl);
+			struct rlimit want = { 8192, 8192 };
+			if (setrlimit(RLIMIT_NOFILE, &want) != 0) {
+				rl.rlim_cur = rl.rlim_max;   /* soft up to hard */
+				setrlimit(RLIMIT_NOFILE, &rl);
+			}
 		}
 	}
 	{
