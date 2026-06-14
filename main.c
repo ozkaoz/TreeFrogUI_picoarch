@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <sys/ioctl.h>
 #include <sys/resource.h>
+#include <time.h>
 
 #define FROGUI_CORE "/mnt/sdcard/cubegm/cores/frogui_libretro.so"
 #define PICOARCH_BIN    "/mnt/sdcard/cubegm/picoarch"
@@ -472,6 +473,41 @@ int remove_config(int is_game) {
 
 static void rewind_apply(void);   /* defined below; applies rewind toggle live */
 
+/* ---- Local play-time stats (no clock/RTC needed; monotonic elapsed). ----
+ * Accumulate seconds per game into /mnt/sdcard/frogui/playtime.txt as
+ * "<seconds>\t<content path>" lines; FrogUI reads it to show play time. */
+#define PLAYTIME_FILE "/mnt/sdcard/frogui/playtime.txt"
+static long playtime_mono(void) {
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return t.tv_sec;
+}
+static void playtime_add(const char *path, long add) {
+	if (add <= 0 || !path || !*path) return;
+	char (*paths)[MAX_PATH] = NULL; long *secs = NULL; int n = 0, cap = 0, found = 0;
+	FILE *f = fopen(PLAYTIME_FILE, "r");
+	if (f) {
+		char line[MAX_PATH + 32];
+		while (fgets(line, sizeof line, f)) {
+			char *tab = strchr(line, '\t'); if (!tab) continue;
+			*tab = 0; char *p = tab + 1;
+			size_t pl = strcspn(p, "\r\n"); p[pl] = 0;
+			if (n >= cap) { cap = cap ? cap*2 : 64;
+				paths = realloc(paths, cap*sizeof(*paths)); secs = realloc(secs, cap*sizeof(*secs)); }
+			snprintf(paths[n], MAX_PATH, "%s", p); secs[n] = atol(line); n++;
+		}
+		fclose(f);
+	}
+	for (int i = 0; i < n; i++) if (!strcmp(paths[i], path)) { secs[i] += add; found = 1; break; }
+	f = fopen(PLAYTIME_FILE, "w");
+	if (f) {
+		for (int i = 0; i < n; i++) fprintf(f, "%ld\t%s\n", secs[i], paths[i]);
+		if (!found) fprintf(f, "%ld\t%s\n", add, path);
+		fflush(f); fsync(fileno(f)); fclose(f);
+	}
+	free(paths); free(secs);
+}
+
 void handle_emu_action(emu_action action)
 {
 	static emu_action prev_action = EACTION_NONE;
@@ -926,6 +962,8 @@ int main(int argc, char **argv) {
 	rewind_init();
 #endif
 
+	long play_start = playtime_mono();   /* for local play-time stats */
+
 	do {
 		count_fps();
 		adjust_audio();
@@ -946,6 +984,9 @@ int main(int argc, char **argv) {
 		if (!should_quit)
 			plat_video_flip();
 	} while (!should_quit);
+
+	if (!g_is_frogui)   /* don't count time spent in the menu */
+		playtime_add(content_path, playtime_mono() - play_start);
 
 	return quit(0);
 }
