@@ -470,6 +470,8 @@ int remove_config(int is_game) {
 	return ret;
 }
 
+static void rewind_apply(void);   /* defined below; applies rewind toggle live */
+
 void handle_emu_action(emu_action action)
 {
 	static emu_action prev_action = EACTION_NONE;
@@ -543,6 +545,7 @@ void handle_emu_action(emu_action action)
 #ifdef MMENU
 		}
 #endif
+		rewind_apply();   /* apply rewind on/off toggled in the menu, no restart */
 		break;
 	case EACTION_TOGGLE_HUD:
 		show_hud = !show_hud;
@@ -737,6 +740,17 @@ static void rewind_init(void) {
 	if (!g_rw_buf) return;
 	g_rw_ssize = s; g_rw_cap = cap; g_rw_head = 0; g_rw_count = 0;
 	DBG("DBG rewind: state=%zu cap=%d (%.1fs)\n", s, cap, cap / 60.0);
+}
+
+/* Apply the rewind toggle live (called when the menu closes) so enabling/disabling
+ * it takes effect without restarting picoarch. */
+static void rewind_apply(void) {
+	if (rewind_enabled && !g_rw_buf) {
+		rewind_init();
+	} else if (!rewind_enabled && g_rw_buf) {
+		free(g_rw_buf); g_rw_buf = NULL;
+		g_rw_cap = g_rw_count = g_rw_head = 0; g_rw_ssize = 0;
+	}
 }
 
 static void rewind_capture(void) {
