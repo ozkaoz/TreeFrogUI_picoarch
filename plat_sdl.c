@@ -707,6 +707,11 @@ void plat_video_menu_enter(int is_rom_loaded)
 	SDL_LockSurface(screen);
 #ifdef PLATFORM_SF3000
 	sf3000_capture_menubg();
+	/* One route for the recents/switcher art: opening the in-game menu updates
+	 * the per-game screenshot. g_menubg_src_ptr holds the live frame here, which
+	 * is exactly what plat_dump_screen reads. */
+	if (is_rom_loaded)
+		save_game_screenshot();
 	memset(screen->pixels, 0, screen->h * screen->pitch);
 #else
 	memcpy(g_menubg_src_ptr, screen->pixels, g_menubg_src_h * g_menubg_src_pp * sizeof(uint16_t));

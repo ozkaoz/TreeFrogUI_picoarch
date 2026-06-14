@@ -985,10 +985,10 @@ int main(int argc, char **argv) {
 			plat_video_flip();
 	} while (!should_quit);
 
-	if (!g_is_frogui) {   /* don't count time spent in the menu */
+	if (!g_is_frogui)   /* don't count time spent in the menu */
 		playtime_add(content_path, playtime_mono() - play_start);
-		save_game_screenshot();   /* per-game "last screen" for recents/switcher art */
-	}
+	/* Screenshot for recents/switcher art is updated on menu-enter (one route),
+	 * not here: at exit the framebuffer is already torn down (black). */
 
 	return quit(0);
 }
