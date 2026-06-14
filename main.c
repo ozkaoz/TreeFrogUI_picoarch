@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/ioctl.h>
+#include <sys/resource.h>
 
 #define FROGUI_CORE "/mnt/sdcard/cubegm/cores/frogui_libretro.so"
 #define PICOARCH_BIN    "/mnt/sdcard/cubegm/picoarch"
@@ -763,6 +764,16 @@ static int rewind_held(void) {
 int main(int argc, char **argv) {
 	setvbuf(stdout, NULL, _IONBF, 0);
 	setvbuf(stderr, NULL, _IONBF, 0);
+	/* driver.so re-inits HCGE/fb/gpio on every menu open and leaks fds; raise
+	 * the limit so a play session can't exhaust it (save state was failing with
+	 * "Too many open files" → freeze). */
+	{
+		struct rlimit rl;
+		if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
+			rl.rlim_cur = (rl.rlim_max > 8192 || rl.rlim_max == RLIM_INFINITY) ? 8192 : rl.rlim_max;
+			setrlimit(RLIMIT_NOFILE, &rl);
+		}
+	}
 	{
 		struct sigaction sa;
 		memset(&sa, 0, sizeof sa);
