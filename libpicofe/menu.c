@@ -688,10 +688,10 @@ static void me_draw(const menu_entry *entries, int sel, void (*draw_more)(void))
 		if (!ent->enabled)
 			continue;
 
-		/* selected row text in FrogUI select_text (black) over the white pill */
+		/* selected row text uses the theme's selected-text colour over the pill */
 		sel_row = menu_font_ready() && (ent == ent_sel);
 		save_col = menu_text_color;
-		if (sel_row) menu_text_color = 0x0000;
+		if (sel_row) menu_text_color = menu_sel_text_color;
 
 		name = ent->name;
 		if (strlen(name) == 0) {
