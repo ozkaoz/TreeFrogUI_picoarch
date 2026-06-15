@@ -599,7 +599,11 @@ int plat_dump_screen(const char *filename) {
 
 	snprintf(imgname, MAX_PATH, "%s.bmp", filename);
 
-	if (g_menuscreen_ptr) {
+	if (g_menubg_src_ptr) {
+		/* Dump the captured menu-bg buffer (the live game frame snapshotted on
+		 * menu enter). Not gated on g_menuscreen_ptr: when called straight from
+		 * plat_video_menu_enter that pointer isn't set yet, and the SF3000 HW
+		 * path never writes screen->pixels, so the else-branch would be black. */
 		surface = SDL_CreateRGBSurfaceFrom(g_menubg_src_ptr,
 		                                   g_menubg_src_w,
 		                                   g_menubg_src_h,

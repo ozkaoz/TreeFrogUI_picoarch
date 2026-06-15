@@ -445,7 +445,10 @@ static bool pa_environment(unsigned cmd, void *data) {
 	case RETRO_ENVIRONMENT_SET_CORE_OPTIONS: { /* 53 */
 		options_free();
 		if (data) {
-			options_init(*(const struct retro_core_option_definition **)data);
+			/* data IS the array pointer (core passes (void*)options), not a
+			 * pointer-to-pointer. The extra deref read options[0].key as the
+			 * array base → garbage key → strlen segfault (FBA2012 hit this). */
+			options_init((const struct retro_core_option_definition *)data);
 			load_config();
 		}
 		break;
