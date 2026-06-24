@@ -1001,6 +1001,11 @@ const char *sf3000_driver_path(void);
 static int plat_sound_init(void)
 {
 #ifdef PLATFORM_SF3000
+	/* SF3500: stock driver is encrypted, so we run the SF3000 video driver — but
+	 * its sound_driver_init segfaults on SF3500's audio HW (I2SO). Skip audio
+	 * entirely (silent) so video comes up. TODO: SF3500 audio path. */
+	{ extern int sf3000_is_sf3500(void);
+	  if (sf3000_is_sf3500()) { PA_INFO("SF3500: audio disabled (driver audio incompatible)\n"); return 0; } }
 	if (!sf3000_sound_handle) {
 		sf3000_sound_handle = dlopen(sf3000_driver_path(), RTLD_LAZY);
 		if (!sf3000_sound_handle)   /* fall back to generic driver.so */
@@ -1593,14 +1598,33 @@ static void sf3000_frame_limit(void) {
     last_tv = tv;
 }
 
-/* Runtime device + panel detection (single binary supports both):
- *   SF3000 — 854x480 16:9, driver_sf3000.so, present via video_driver_disp_frame
- *   R36SX  — 640x480 4:3,  driver_r36sx.so,  present via direct fb0 write
- * Detected once from the device-tree panel node (R36SX panel chip = r63311).
- * Panel dims + UI scale are exported via env (TF_PANEL_W/H/UI_SCALE) so the
- * FrogUI libretro core renders at the right resolution. */
+/* Runtime device detection — one SD image, N devices, profile chosen at boot.
+ *
+ * Primary source: the boot detector (cubegm/tf_detect.sh) writes
+ * /tmp/tfdevice.env (TF_DEVICE + panel geometry) before any frontend launches.
+ * Fallback: if that file is absent (dev / standalone run), scan the live
+ * device-tree at /proc/device-tree using the same rules the script uses.
+ *
+ * Per-device facts (all derived from the stock dtb's panel nodes):
+ *   R36SX  — panel 640x480 landscape, 4:3,  driver_r36sx.so,  present = fb-write
+ *            (panel chip r63311; its disp_frame hangs → direct fb0 write)
+ *   SF3000 — panel 480x854 portrait → 854x480 16:9, driver_sf3000.so,
+ *            present = disp_frame (90° CW rotate). DT: /hcrtos/lcd, no /panel.
+ *   SF3500 — panel geometry identical to SF3000 (same timings); only the
+ *            driver.so binary differs. driver_sf3500.so, present = disp_frame.
+ *            DT: /panel node present (lcd-type=1), no r63311.
+ *
+ * Detection rule (file or DT both resolve to one of these):
+ *   r63311 node present            → R36SX
+ *   else /panel node present       → SF3500
+ *   else (/hcrtos/lcd, no /panel)  → SF3000
+ *
+ * "present = fb-write" (R36SX only) is the single behavioural split downstream;
+ * SF3500 follows SF3000 in every code path, differing only by driver file. */
 extern void dbg_log(const char *fmt, ...);
-static int g_dev_r36sx = -1;   /* -1 = undetected, 0 = SF3000, 1 = R36SX */
+enum { TF_DEV_SF3000 = 0, TF_DEV_R36SX = 1, TF_DEV_SF3500 = 2 };
+static int g_dev_id = -1;       /* -1 = undetected */
+static int g_dev_r36sx = -1;    /* derived: 1 if R36SX (the fb-write device) */
 static int g_dev_w = 854, g_dev_h = 480, g_dev_scale = 150;
 
 /* Recursively scan /proc/device-tree for the R36SX panel node (r63311), without
@@ -1623,32 +1647,87 @@ static void dt_scan_r63311(const char *dir, int depth, int *found) {
     closedir(d);
 }
 
+/* Map a device name (from env file or DT scan) to the id enum. Unknown → -1. */
+static int tf_id_from_name(const char *n) {
+    if (!n) return -1;
+    if (!strcasecmp(n, "R36SX"))  return TF_DEV_R36SX;
+    if (!strcasecmp(n, "SF3500")) return TF_DEV_SF3500;
+    if (!strcasecmp(n, "SF3000")) return TF_DEV_SF3000;
+    return -1;
+}
+
+/* Read TF_DEVICE / TF_PANEL_W / TF_PANEL_H / TF_UI_SCALE from the boot env file.
+ * Returns the device id (or -1 if the file is missing / has no usable TF_DEVICE).
+ * Geometry lines are optional overrides applied to the w/h/scale outputs. */
+static int tf_read_env_file(int *w, int *h, int *scale) {
+    FILE *f = fopen("/tmp/tfdevice.env", "r");
+    if (!f) return -1;
+    int id = -1;
+    char line[128];
+    while (fgets(line, sizeof line, f)) {
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq = 0;
+        char *key = line, *val = eq + 1;
+        char *nl = strpbrk(val, "\r\n"); if (nl) *nl = 0;
+        if      (!strcmp(key, "TF_DEVICE"))   id = tf_id_from_name(val);
+        else if (!strcmp(key, "TF_PANEL_W"))  { int v = atoi(val); if (v > 0) *w = v; }
+        else if (!strcmp(key, "TF_PANEL_H"))  { int v = atoi(val); if (v > 0) *h = v; }
+        else if (!strcmp(key, "TF_UI_SCALE")) { int v = atoi(val); if (v > 0) *scale = v; }
+    }
+    fclose(f);
+    return id;
+}
+
 void sf3000_detect_device(void) {
-    if (g_dev_r36sx != -1) return;
-    int found = 0;
-    dt_scan_r63311("/proc/device-tree", 0, &found);
-    g_dev_r36sx = found;
-    /* Both panels are 480 tall → same UI scale gives a consistent layout. */
-    if (found) { g_dev_w = 640; g_dev_h = 480; g_dev_scale = 150; }
-    else       { g_dev_w = 854; g_dev_h = 480; g_dev_scale = 150; }
+    if (g_dev_id != -1) return;
+
+    int w = 854, h = 480, scale = 150;        /* defaults (SF3000/SF3500) */
+    int id = tf_read_env_file(&w, &h, &scale); /* primary: boot env file */
+    if (id < 0) id = tf_id_from_name(getenv("TF_DEVICE")); /* inherited env */
+    if (id < 0) {                              /* fallback: scan live DT */
+        int r63311 = 0;
+        dt_scan_r63311("/proc/device-tree", 0, &r63311);
+        if (r63311)
+            id = TF_DEV_R36SX;
+        else if (access("/proc/device-tree/panel", F_OK) == 0)
+            id = TF_DEV_SF3500;
+        else
+            id = TF_DEV_SF3000;
+    }
+
+    /* Panel geometry by device (env-file overrides above already applied to
+     * w/h when present; otherwise set the known per-device defaults). */
+    if (id == TF_DEV_R36SX) { if (w == 854) w = 640; }  /* landscape 640x480 */
+    g_dev_id    = id;
+    g_dev_r36sx = (id == TF_DEV_R36SX);
+    g_dev_w = w; g_dev_h = h; g_dev_scale = scale;
+
     char s[16];
     snprintf(s, sizeof s, "%d", g_dev_w);     setenv("TF_PANEL_W", s, 1);
     snprintf(s, sizeof s, "%d", g_dev_h);     setenv("TF_PANEL_H", s, 1);
     snprintf(s, sizeof s, "%d", g_dev_scale); setenv("TF_UI_SCALE", s, 1);
     dbg_log("DBG device: %s panel=%dx%d ui_scale=%d\n",
-            found ? "R36SX" : "SF3000", g_dev_w, g_dev_h, g_dev_scale);
+            id == TF_DEV_R36SX ? "R36SX" : id == TF_DEV_SF3500 ? "SF3500" : "SF3000",
+            g_dev_w, g_dev_h, g_dev_scale);
 }
 
 int sf3000_panel_w(void)  { sf3000_detect_device(); return g_dev_w; }
 int sf3000_panel_h(void)  { sf3000_detect_device(); return g_dev_h; }
 int sf3000_is_r36sx(void) { sf3000_detect_device(); return g_dev_r36sx > 0; }
+int sf3000_is_sf3500(void) { sf3000_detect_device(); return g_dev_id == TF_DEV_SF3500; }
 
-/* Device-correct driver.so path (video AND audio must match the panel/SoC build;
- * loading the wrong one segfaults the proprietary audio init). */
+/* Device-correct driver.so path. NOTE: SF3500's stock driver.so is ENCRYPTED
+ * (the firmware decrypts it at load) — we can't dlopen it. Its panel is identical
+ * to SF3000, so we use the plaintext SF3000 driver for VIDEO. Its AUDIO init
+ * segfaults on SF3500's SoC (I2SO), so SF3500 audio is skipped (plat_sound_init). */
 const char *sf3000_driver_path(void) {
     sf3000_detect_device();
-    return g_dev_r36sx > 0 ? "/mnt/sdcard/cubegm/driver_r36sx.so"
-                           : "/mnt/sdcard/cubegm/driver_sf3000.so";
+    switch (g_dev_id) {
+    case TF_DEV_R36SX:  return "/mnt/sdcard/cubegm/driver_r36sx.so";
+    case TF_DEV_SF3500: return "/mnt/sdcard/cubegm/driver_sf3500.so"; /* encrypted → dlopen fails → SW path */
+    default:            return "/mnt/sdcard/cubegm/driver_sf3000.so";
+    }
 }
 
 #define PANEL_W (sf3000_panel_w())

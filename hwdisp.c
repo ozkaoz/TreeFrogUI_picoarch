@@ -145,13 +145,11 @@ int hwdisp_init(void) {
     if (g_active) return 0;
     sf3000_dump_fb_state("hwdisp_init/pre");
 
-    /* Device-specific driver: R36SX and SF3000 ship different driver.so builds
-     * (panel init + render behavior differ). Pick by detected device; fall back
-     * to a generic driver.so if the per-device file is absent. */
-    extern int sf3000_is_r36sx(void);
-    const char *drv = sf3000_is_r36sx()
-        ? "/mnt/sdcard/cubegm/driver_r36sx.so"
-        : "/mnt/sdcard/cubegm/driver_sf3000.so";
+    /* Device-specific driver: each device ships its own driver.so build (panel
+     * init + render behavior differ). Single source of truth in plat_sdl.c;
+     * fall back to a generic driver.so if the per-device file is absent. */
+    extern const char *sf3000_driver_path(void);
+    const char *drv = sf3000_driver_path();
     g_handle = dlopen(drv, RTLD_NOW | RTLD_GLOBAL);
     if (!g_handle) {
         DBG("DBG hwdisp: dlopen %s failed (%s), trying driver.so\n", drv, dlerror());
@@ -188,6 +186,7 @@ int hwdisp_init(void) {
      * engine-sync doesn't hang (rkgame configures before presenting). disp_frame
      * then HW-scales src→panel (no CPU upscale). Try a few mode args; logged
      * fsync'd so a hang still tells us how far it got. */
+    extern int sf3000_is_r36sx(void);
     if (sf3000_is_r36sx()) {
         typedef int (*fn_setmode_t)(int, int);
         fn_setmode_t p_setmode = (fn_setmode_t)dlsym(g_handle, "video_driver_setmode");
