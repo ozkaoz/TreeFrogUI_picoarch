@@ -1769,7 +1769,58 @@ const char *sf3000_driver_path(void) {
 #define PANEL_ASPECT_NUM (sf3000_is_r36sx() ? 4 : 16)
 #define PANEL_ASPECT_DEN (sf3000_is_r36sx() ? 3 : 9)
 
+/* Screenshot: dump the current RGB565 frame to a top-down 24bpp BMP. */
+static void sf3000_screenshot(const void *src, int w, int h, int pitch) {
+    if (!src || w <= 0 || h <= 0) return;
+    system("mkdir -p /mnt/sdcard/screenshots 2>/dev/null");
+    static int n = 0;
+    char path[96];
+    snprintf(path, sizeof path, "/mnt/sdcard/screenshots/shot_%03d.bmp", n++);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    int rowb = (w * 3 + 3) & ~3;           /* BMP rows padded to 4 bytes */
+    int isz = rowb * h, fsz = 54 + isz, neg = -h;  /* negative h = top-down */
+    unsigned char hd[54] = {0};
+    hd[0]='B'; hd[1]='M';
+    hd[2]=fsz; hd[3]=fsz>>8; hd[4]=fsz>>16; hd[5]=fsz>>24; hd[10]=54;
+    hd[14]=40;
+    hd[18]=w; hd[19]=w>>8; hd[20]=w>>16; hd[21]=w>>24;
+    hd[22]=neg; hd[23]=neg>>8; hd[24]=neg>>16; hd[25]=neg>>24;
+    hd[26]=1; hd[28]=24;
+    fwrite(hd, 1, 54, f);
+    int sp = pitch / 2;
+    const uint16_t *s = (const uint16_t *)src;
+    unsigned char *line = (unsigned char *)calloc(1, rowb);
+    if (line) {
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                uint16_t p = s[(size_t)y * sp + x];
+                int r = (p >> 11) & 31, g = (p >> 5) & 63, b = p & 31;
+                line[x*3]   = (b << 3) | (b >> 2);   /* B */
+                line[x*3+1] = (g << 2) | (g >> 4);   /* G */
+                line[x*3+2] = (r << 3) | (r >> 2);   /* R */
+            }
+            fwrite(line, 1, rowb, f);
+        }
+        free(line);
+    }
+    fclose(f);
+    sync();
+    fprintf(stderr, "screenshot saved: %s\n", path);
+}
+
 void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
+    /* Screenshot hotkey: SELECT (bit0) + L1 (bit10). Capture whatever's on screen
+     * (game/FrogUI/menu frame), rising-edge so one shot per press. L1 picked
+     * because R2/R1/L2/START/B/Y are already taken by the OnionOS hotkeys. */
+    {
+        extern volatile uint32_t sf3000_keys_filtered;
+        static int prev_combo = 0;
+        uint32_t combo = (1u << 0) | (1u << 10);
+        int now = (sf3000_keys_filtered & combo) == combo;
+        if (now && !prev_combo) sf3000_screenshot(src, width, height, pitch);
+        prev_combo = now;
+    }
     {
         extern void dbg_log(const char *fmt, ...);
         static int s_blit = 0;
