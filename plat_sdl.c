@@ -84,12 +84,15 @@ static void *sf3000_input_thread_fn(void *unused) {
 static void sf3000_keys_init(void) {
     key_t k = ftok("/tmp/joy_key", 'a');
     if (k == (key_t)-1) { fprintf(stderr, "SF3000 input: ftok failed\n"); return; }
-    int id = shmget(k, 4, 0666);
-    if (id < 0) { fprintf(stderr, "SF3000 input: shmget failed\n"); return; }
+    /* Attach to cubevol's joy_key shm (cubevol reads gpio → writes it). On SF3500
+     * rkgame is kept ALIVE (hijack core forks instead of execl) so the input
+     * pipeline stays up. IPC_CREAT: harmless if it already exists. */
+    int id = shmget(k, 4, IPC_CREAT | 0666);
+    if (id < 0) { fprintf(stderr, "SF3000 input: shmget failed errno=%d\n", errno); return; }
     void *p = shmat(id, NULL, 0);
     if (p == (void *)-1) { fprintf(stderr, "SF3000 input: shmat failed\n"); return; }
     sf3000_keys_ptr = (volatile uint32_t *)p;
-    fprintf(stderr, "SF3000 input: cubevol shm OK, initial keys=0x%08X\n", *sf3000_keys_ptr);
+    fprintf(stderr, "SF3000 input: joy_key shm OK, initial keys=0x%08X\n", *sf3000_keys_ptr);
     pthread_create(&sf3000_input_thread, NULL, sf3000_input_thread_fn, NULL);
 }
 
@@ -1001,11 +1004,11 @@ const char *sf3000_driver_path(void);
 static int plat_sound_init(void)
 {
 #ifdef PLATFORM_SF3000
-	/* SF3500: stock driver is encrypted, so we run the SF3000 video driver — but
-	 * its sound_driver_init segfaults on SF3500's audio HW (I2SO). Skip audio
-	 * entirely (silent) so video comes up. TODO: SF3500 audio path. */
+	/* SF3500: real driver's sound_driver_playframe NULL-derefs (addr+0x278) in the
+	 * audio thread → SIGSEGV crash-loop. Skip audio (silent) until its calling
+	 * convention is worked out. Video (disp_frame) is unaffected. */
 	{ extern int sf3000_is_sf3500(void);
-	  if (sf3000_is_sf3500()) { PA_INFO("SF3500: audio disabled (driver audio incompatible)\n"); return 0; } }
+	  if (sf3000_is_sf3500()) { PA_INFO("SF3500: audio disabled (playframe segv)\n"); return 0; } }
 	if (!sf3000_sound_handle) {
 		sf3000_sound_handle = dlopen(sf3000_driver_path(), RTLD_LAZY);
 		if (!sf3000_sound_handle)   /* fall back to generic driver.so */
@@ -1207,6 +1210,7 @@ int plat_init(void)
         PA_ERROR("sf3000_fb_init failed\n");
         return -1;
     }
+    dbg_log("DBG M1: fb_init ok\n");
     /* Off-screen staging buffer only — do NOT call SDL_SetVideoMode,
        it changes fb0 resolution away from 720x1280 and breaks our mmap writes. */
     screen = SDL_CreateRGBSurface(SDL_SWSURFACE, SCREEN_WIDTH, SCREEN_HEIGHT, 16,
@@ -1220,6 +1224,7 @@ int plat_init(void)
             screen->w, screen->h, screen->format->BitsPerPixel, screen->pitch);
     PA_INFO("SF3000: fb0 + SDL dummy surface ready (%dx%d)\n", SCREEN_WIDTH, SCREEN_HEIGHT);
     SDL_ShowCursor(0);
+    dbg_log("DBG M2: sdl surface ok\n");
 
     g_menuscreen_w  = SCREEN_WIDTH;
     g_menuscreen_h  = SCREEN_HEIGHT;
@@ -1239,6 +1244,7 @@ int plat_init(void)
         PA_ERROR("SF3000 SDL sound failed to init (continuing without audio): %s\n", SDL_GetError());
     }
 
+dbg_log("DBG M3: sound init done\n");
     sf3000_keys_init();
     extern void sf3000_calibrate_input(void);
     extern void sf3000_load_keymap(void);
@@ -1389,6 +1395,27 @@ int sf3000_fb_init(void) {
     /* Detect device + export panel geometry to env before the core's retro_init
      * reads it (single binary → SF3000 854x480 or R36SX 640x480). */
     { extern void sf3000_detect_device(void); sf3000_detect_device(); }
+
+    /* SF3500: the real (decrypted) driver owns the display — its video_drivers_init
+     * sets fb geometry + dtb rotation correctly (proven by rkgame's own render).
+     * picoarch's FBIOPUT/dis-ioctl/SW-mmap below FIGHTS that HCGE setup → garbled
+     * disp_frame. Skip all of it: load the driver, present only via disp_frame. */
+    if (sf3000_is_sf3500()) {
+        extern int hwdisp_init(void);
+        if (hwdisp_init() == 0) {
+            sf3000_use_hwdisp = 1;
+            /* Driver set fb geometry+rotation. Turn the display ON (rkgame did this
+             * at boot; we killed rkgame) WITHOUT FBIOPUT (that clobbers geometry).
+             * Wire display→fb0 + unblank. */
+            int dis = open("/dev/dis", O_RDWR);
+            if (dis >= 0) { struct { int a,b,c; } b = {1,0,0}; ioctl(dis, 0xc00c0e0c, &b); close(dis); }
+            int fb = open("/dev/fb0", O_RDWR);
+            if (fb >= 0) { ioctl(fb, FBIOBLANK, 1); ioctl(fb, FBIOBLANK, 0); close(fb); }
+            fprintf(stderr, "sf3000_fb_init: SF3500 driver owns display, panel on (disp_frame only)\n");
+            return 0;
+        }
+        fprintf(stderr, "sf3000_fb_init: SF3500 hwdisp_init failed, falling back\n");
+    }
     /* Write per-process init log to dedicated file with fsync, so it
      * survives even when stderr buffer is lost on power-cycle. */
     int initlog = open("/mnt/sdcard/picoarch_init.log",
@@ -1717,15 +1744,15 @@ int sf3000_panel_h(void)  { sf3000_detect_device(); return g_dev_h; }
 int sf3000_is_r36sx(void) { sf3000_detect_device(); return g_dev_r36sx > 0; }
 int sf3000_is_sf3500(void) { sf3000_detect_device(); return g_dev_id == TF_DEV_SF3500; }
 
-/* Device-correct driver.so path. NOTE: SF3500's stock driver.so is ENCRYPTED
- * (the firmware decrypts it at load) — we can't dlopen it. Its panel is identical
- * to SF3000, so we use the plaintext SF3000 driver for VIDEO. Its AUDIO init
- * segfaults on SF3500's SoC (I2SO), so SF3500 audio is skipped (plat_sound_init). */
+/* Device-correct driver.so path. NOTE: SF3500's STOCK driver.so is ENCRYPTED
+ * (firmware decrypts it to /tmp/cubegm/driver.so at boot). We grab that plaintext
+ * at runtime (zhijack) and ship it AS driver_sf3500.so — a real ELF picoarch can
+ * dlopen for HW video + audio. */
 const char *sf3000_driver_path(void) {
     sf3000_detect_device();
     switch (g_dev_id) {
     case TF_DEV_R36SX:  return "/mnt/sdcard/cubegm/driver_r36sx.so";
-    case TF_DEV_SF3500: return "/mnt/sdcard/cubegm/driver_sf3500.so"; /* encrypted → dlopen fails → SW path */
+    case TF_DEV_SF3500: return "/mnt/sdcard/cubegm/driver_sf3500.so"; /* decrypted, real driver */
     default:            return "/mnt/sdcard/cubegm/driver_sf3000.so";
     }
 }
@@ -1770,8 +1797,12 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
     }
     /* Lazy-init HW: R36SX always (disp_frame hangs → fb-write for everything);
      * SF3000 only on bilinear frames (nearest games take the SW path). */
+    /* SF3500: always present via the real driver's disp_frame (decrypted driver
+     * handles panel-size frames cleanly — proven by rkgame's own FrogUI render).
+     * The SW transpose path is SF3000-geometry-tuned → squish + page-flip churn
+     * on SF3500, so route everything (incl. nearest/menu frames) through HW. */
     if (!sf3000_use_hwdisp &&
-        (sf3000_is_r36sx() || scale_filter == SCALE_FILTER_BILINEAR)) {
+        (sf3000_is_r36sx() || sf3000_is_sf3500() || scale_filter == SCALE_FILTER_BILINEAR)) {
         if (hwdisp_init() == 0) {
             sf3000_use_hwdisp = 1;
             fprintf(stderr, "sf3000_fb_blit: HW path active\n");
@@ -1860,6 +1891,23 @@ if (sf3000_use_hwdisp) {
         }
         sf3000_frame_limit();   /* paces emulation (target scales with FF level) */
         if (ff_skip) return;    /* FF: drop this present to keep display 60fps */
+        /* SF3500: the picoarch pause menu renders to the SDL surface (320x240) →
+         * disp_frame tiles that odd size. Nearest-scale ONLY the menu surface up
+         * to PANEL; game/FrogUI core frames (src != screen) keep their own
+         * aspect/integer/full scaling (disp_frame target-aspect handles them). */
+        if (sf3000_is_sf3500() && src == screen->pixels) {
+            static uint16_t *mb = NULL;
+            if (!mb) mb = (uint16_t*)malloc(PANEL_W * PANEL_H * 2);
+            if (mb) {
+                const uint16_t *s = (const uint16_t*)src; int sp = pitch/2;
+                for (int y = 0; y < PANEL_H; y++) {
+                    const uint16_t *srow = s + (size_t)(y * height / PANEL_H) * sp;
+                    uint16_t *drow = mb + (size_t)y * PANEL_W;
+                    for (int x = 0; x < PANEL_W; x++) drow[x] = srow[x * width / PANEL_W];
+                }
+                src = mb; width = PANEL_W; height = PANEL_H; pitch = PANEL_W * 2;
+            }
+        }
         if (!(sf3000_is_r36sx() && hwdisp_present_direct(src, width, height, pitch)))
             hwdisp_present(src, width, height, pitch);
         return;
