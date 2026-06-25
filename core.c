@@ -545,10 +545,11 @@ static void pa_input_poll(void) {
 
 #ifdef PLATFORM_SF3000
 	extern volatile uint32_t *sf3000_keys_ptr;
+	extern volatile uint32_t sf3000_keys_filtered;
 	extern uint32_t sf3000_keys_to_buttons(uint32_t);
 
 	if (sf3000_keys_ptr) {
-		uint32_t raw = *sf3000_keys_ptr;
+		uint32_t raw = sf3000_keys_filtered;  /* race-filtered (see plat_sdl.c) */
 		static uint32_t prev_raw = 0;   /* for rising-edge combo detection */
 
 		/* OnionOS-style hotkeys, SELECT acts as the MENU/function modifier:

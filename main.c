@@ -808,8 +808,9 @@ static int rewind_back(void) {
 
 static int rewind_held(void) {
 	extern volatile uint32_t *sf3000_keys_ptr;
+	extern volatile uint32_t sf3000_keys_filtered;
 	if (!sf3000_keys_ptr) return 0;
-	uint32_t r = *sf3000_keys_ptr;
+	uint32_t r = sf3000_keys_filtered;  /* race-filtered */
 	return (r & ((1u << 0) | (1u << 14))) == ((1u << 0) | (1u << 14)); /* SELECT+B */
 }
 #endif
@@ -935,11 +936,14 @@ int main(int argc, char **argv) {
 	DBG("DBG main: post-FrogUI-override scale_filter=%d auto_resume=%d\n",
 	        scale_filter, g_auto_resume);
 #endif
+	dbg_log("DBG M4: pre core_load\n");
 	core_load();
+	dbg_log("DBG M5: core_load done\n");
 
 	if (core_load_content(content)) {
 		quit(-1);
 	}
+	dbg_log("DBG M6: content loaded, entering run loop\n");
 
 	/* Hide cubevol's battery/volume OSD (/dev/fb1) during gameplay. Skipped
 	 * for FrogUI (the menu core) so the menu still shows battery. */

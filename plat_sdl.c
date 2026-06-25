@@ -33,6 +33,11 @@ int sf3000_use_hwdisp = 0;
 /* cubevol shared memory: ftok("/tmp/joy_key", 'a') → 4-byte key state.
    Low 16 bits = button bitmask (bit set = pressed). */
 volatile uint32_t *sf3000_keys_ptr = NULL;
+/* Filtered key state: rkgame AND cubevol both write joy_key (fork keeps rkgame
+ * alive), so the raw value flickers at press/release edges → missed + ghost
+ * inputs. The input thread publishes a majority-of-3 filtered value here; ALL
+ * readers (menu, game core, hotkeys) use this instead of the raw shm. */
+volatile uint32_t sf3000_keys_filtered = 0;
 
 /* Background thread: polls cubevol and injects SDL events so menu works.
    Derives SDL keys from sf3000_keymap[] — no duplicate bit values. */
@@ -55,15 +60,17 @@ static SDLKey sf3000_retro_to_sdlkey(int retro_id) {
 }
 
 static void *sf3000_input_thread_fn(void *unused) {
-    uint32_t prev = 0, last = 0;
+    uint32_t prev = 0;
+    uint32_t s0 = 0, s1 = 0, s2 = 0;   /* last 3 raw samples for majority filter */
     while (1) {
-        usleep(16000);
+        usleep(8000);                  /* ~8ms; 3 samples ≈ 24ms latency */
         if (!sf3000_keys_ptr) continue;
-        uint32_t cur = *sf3000_keys_ptr & 0xFFFF;
-        /* Debounce: only act on a state that's stable for 2 polls (~32ms). Filters
-         * transient cubevol shmem glitches that otherwise inject phantom presses
-         * (e.g. a stray B → menu "back"). */
-        if (cur != last) { last = cur; continue; }
+        s2 = s1; s1 = s0; s0 = *sf3000_keys_ptr;
+        /* Majority-of-3 per bit: a bit must be set in >=2 of the last 3 samples.
+         * Kills the 1-sample edge flicker from the rkgame+cubevol two-writer race. */
+        uint32_t filt = (s0 & s1) | (s1 & s2) | (s0 & s2);
+        sf3000_keys_filtered = filt;
+        uint32_t cur = filt & 0xFFFF;
         uint32_t changed = cur ^ prev;
         if (!changed) continue;
         for (int i = 0; i < sf3000_keymap_count; i++) {
