@@ -950,10 +950,26 @@ static pthread_mutex_t    sf3000_aring_mtx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t          sf3000_audio_thread;
 static volatile int       sf3000_audio_running = 0;
 
+static volatile int sf3000_audio_init_rc = 0;   /* 0=pending, 1=ok, -1=failed */
+
 static void *sf3000_audio_thread_fn(void *unused)
 {
 	(void)unused;
 	struct audio_frame chunk[SF3000_ACHUNK];
+
+	/* Init the DAC ON THIS THREAD. The SF3500/HD/SF3100 driver keeps its audio
+	 * handle thread-local, so sound_driver_init() and sound_driver_playframe()
+	 * MUST run on the same thread — init on the emu thread left a NULL handle
+	 * here, so playframe deref'd it (+0x278 SIGSEGV). pcsx4all works precisely
+	 * because it inits + feeds on one thread. Doing it here fixes SF3500-class
+	 * and is harmless for SF3000 (same-thread init is strictly safer). */
+	if (sf3000_sound_driver_init && sf3000_sound_driver_init(NULL, SAMPLE_RATE, 2) < 0) {
+		PA_ERROR("SF3000: sound_driver_init failed on audio thread\n");
+		sf3000_audio_init_rc = -1;
+		sf3000_audio_running = 0;
+		return NULL;
+	}
+	sf3000_audio_init_rc = 1;
 
 	while (sf3000_audio_running) {
 		int have_chunk = 0;
@@ -978,6 +994,9 @@ static void *sf3000_audio_thread_fn(void *unused)
 		if (sf3000_sound_driver_playframe)
 			sf3000_sound_driver_playframe(chunk, SF3000_ACHUNK);
 	}
+	/* Deinit on the same thread that init'd + played (thread-local handle). */
+	if (sf3000_sound_driver_deinit)
+		sf3000_sound_driver_deinit();
 	return NULL;
 }
 #endif
@@ -987,10 +1006,7 @@ static void plat_sound_finish(void)
 #ifdef PLATFORM_SF3000
 	if (sf3000_audio_running) {
 		sf3000_audio_running = 0;
-		pthread_join(sf3000_audio_thread, NULL);
-	}
-	if (sf3000_sound_driver_deinit) {
-		sf3000_sound_driver_deinit();
+		pthread_join(sf3000_audio_thread, NULL);  /* thread deinits the DAC itself */
 	}
 	if (sf3000_sound_handle) {
 		dlclose(sf3000_sound_handle);
@@ -1011,11 +1027,9 @@ const char *sf3000_driver_path(void);
 static int plat_sound_init(void)
 {
 #ifdef PLATFORM_SF3000
-	/* SF3500: real driver's sound_driver_playframe NULL-derefs (addr+0x278) in the
-	 * audio thread → SIGSEGV crash-loop. Skip audio (silent) until its calling
-	 * convention is worked out. Video (disp_frame) is unaffected. */
-	{ extern int sf3000_is_sf3500(void);
-	  if (sf3000_is_sf3500()) { PA_INFO("SF3500: audio disabled (playframe segv)\n"); return 0; } }
+	/* NOTE: sound_driver_init() is NOT called here — it runs on the audio thread
+	 * (the SF3500-class driver's handle is thread-local; see sf3000_audio_thread_fn).
+	 * Here we only dlopen/dlsym, set rates, and start that thread. */
 	if (!sf3000_sound_handle) {
 		sf3000_sound_handle = dlopen(sf3000_driver_path(), RTLD_LAZY);
 		if (!sf3000_sound_handle)   /* fall back to generic driver.so */
@@ -1036,16 +1050,12 @@ static int plat_sound_init(void)
 		}
 	}
 
-	if (sf3000_sound_driver_init(NULL, SAMPLE_RATE, 2) < 0) {
-		PA_ERROR("SF3000: sound_driver_init failed\n");
-		return -1;
-	}
-
 	audio.in_sample_rate = sample_rate;
 	audio.out_sample_rate = SAMPLE_RATE;
 
-	/* Start the non-blocking audio consumer thread. */
+	/* Start the non-blocking audio consumer thread (it init's the DAC itself). */
 	sf3000_aring_w = sf3000_aring_r = 0;
+	sf3000_audio_init_rc = 0;
 	if (!sf3000_audio_running) {
 		sf3000_audio_running = 1;
 		if (pthread_create(&sf3000_audio_thread, NULL,
