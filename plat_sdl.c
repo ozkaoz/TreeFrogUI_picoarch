@@ -1656,7 +1656,7 @@ static void sf3000_frame_limit(void) {
  * "present = fb-write" (R36SX only) is the single behavioural split downstream;
  * SF3500 follows SF3000 in every code path, differing only by driver file. */
 extern void dbg_log(const char *fmt, ...);
-enum { TF_DEV_SF3000 = 0, TF_DEV_R36SX = 1, TF_DEV_SF3500 = 2 };
+enum { TF_DEV_SF3000 = 0, TF_DEV_R36SX = 1, TF_DEV_SF3500 = 2, TF_DEV_GB350 = 3 };
 static int g_dev_id = -1;       /* -1 = undetected */
 static int g_dev_r36sx = -1;    /* derived: 1 if R36SX (the fb-write device) */
 static int g_dev_w = 854, g_dev_h = 480, g_dev_scale = 150;
@@ -1687,6 +1687,7 @@ static int tf_id_from_name(const char *n) {
     if (!strcasecmp(n, "R36SX"))  return TF_DEV_R36SX;
     if (!strcasecmp(n, "SF3500")) return TF_DEV_SF3500;
     if (!strcasecmp(n, "SF3000")) return TF_DEV_SF3000;
+    if (!strcasecmp(n, "GB350"))  return TF_DEV_GB350;
     return -1;
 }
 
@@ -1724,15 +1725,23 @@ void sf3000_detect_device(void) {
         dt_scan_r63311("/proc/device-tree", 0, &r63311);
         if (r63311)
             id = TF_DEV_R36SX;
-        else if (access("/proc/device-tree/panel", F_OK) == 0)
-            id = TF_DEV_SF3500;
-        else
+        else if (access("/proc/device-tree/panel", F_OK) == 0) {
+            /* /panel devices are 854x480 SF3500-class — EXCEPT GB350, which is
+             * 640x480 and is the only /panel device lacking BOTH hcrtos/
+             * multiple_init (present on SF3000HD) and hcrtos/uart@1 (present on
+             * SF3500/SF3100). */
+            if (access("/proc/device-tree/hcrtos/multiple_init", F_OK) == 0 ||
+                access("/proc/device-tree/hcrtos/uart@1", F_OK) == 0)
+                id = TF_DEV_SF3500;
+            else
+                id = TF_DEV_GB350;
+        } else
             id = TF_DEV_SF3000;
     }
 
     /* Panel geometry by device (env-file overrides above already applied to
      * w/h when present; otherwise set the known per-device defaults). */
-    if (id == TF_DEV_R36SX) { if (w == 854) w = 640; }  /* landscape 640x480 */
+    if (id == TF_DEV_R36SX || id == TF_DEV_GB350) { if (w == 854) w = 640; }  /* landscape 640x480, 4:3 */
     g_dev_id    = id;
     g_dev_r36sx = (id == TF_DEV_R36SX);
     g_dev_w = w; g_dev_h = h; g_dev_scale = scale;
@@ -1742,7 +1751,8 @@ void sf3000_detect_device(void) {
     snprintf(s, sizeof s, "%d", g_dev_h);     setenv("TF_PANEL_H", s, 1);
     snprintf(s, sizeof s, "%d", g_dev_scale); setenv("TF_UI_SCALE", s, 1);
     dbg_log("DBG device: %s panel=%dx%d ui_scale=%d\n",
-            id == TF_DEV_R36SX ? "R36SX" : id == TF_DEV_SF3500 ? "SF3500" : "SF3000",
+            id == TF_DEV_R36SX ? "R36SX" : id == TF_DEV_SF3500 ? "SF3500" :
+            id == TF_DEV_GB350 ? "GB350" : "SF3000",
             g_dev_w, g_dev_h, g_dev_scale);
 }
 
@@ -1750,6 +1760,9 @@ int sf3000_panel_w(void)  { sf3000_detect_device(); return g_dev_w; }
 int sf3000_panel_h(void)  { sf3000_detect_device(); return g_dev_h; }
 int sf3000_is_r36sx(void) { sf3000_detect_device(); return g_dev_r36sx > 0; }
 int sf3000_is_sf3500(void) { sf3000_detect_device(); return g_dev_id == TF_DEV_SF3500; }
+int sf3000_is_gb350(void) { sf3000_detect_device(); return g_dev_id == TF_DEV_GB350; }
+/* 4:3 panels (R36SX, GB350 = 640x480) vs 16:9 (SF3000/SF3500 = 854x480). */
+int sf3000_aspect_is_43(void) { sf3000_detect_device(); return g_dev_r36sx > 0 || g_dev_id == TF_DEV_GB350; }
 
 /* Device-correct driver.so path. NOTE: SF3500's STOCK driver.so is ENCRYPTED
  * (firmware decrypts it to /tmp/cubegm/driver.so at boot). We grab that plaintext
@@ -1760,14 +1773,15 @@ const char *sf3000_driver_path(void) {
     switch (g_dev_id) {
     case TF_DEV_R36SX:  return "/mnt/sdcard/cubegm/driver_r36sx.so";
     case TF_DEV_SF3500: return "/mnt/sdcard/cubegm/driver_sf3500.so"; /* decrypted, real driver */
+    case TF_DEV_GB350:  return "/mnt/sdcard/cubegm/driver_gb350.so";  /* plain ELF, 640x480 */
     default:            return "/mnt/sdcard/cubegm/driver_sf3000.so";
     }
 }
 
 #define PANEL_W (sf3000_panel_w())
 #define PANEL_H (sf3000_panel_h())
-#define PANEL_ASPECT_NUM (sf3000_is_r36sx() ? 4 : 16)
-#define PANEL_ASPECT_DEN (sf3000_is_r36sx() ? 3 : 9)
+#define PANEL_ASPECT_NUM (sf3000_aspect_is_43() ? 4 : 16)
+#define PANEL_ASPECT_DEN (sf3000_aspect_is_43() ? 3 : 9)
 
 /* Screenshot: dump the current RGB565 frame to a top-down 24bpp BMP. */
 static void sf3000_screenshot(const void *src, int w, int h, int pitch) {
