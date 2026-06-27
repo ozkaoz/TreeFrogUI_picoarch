@@ -59,18 +59,32 @@ static SDLKey sf3000_retro_to_sdlkey(int retro_id) {
     }
 }
 
+/* Debounce depth: a bit flips state only after this many consecutive samples
+ * agree on the new state. At 8ms/sample, 3 = 24ms (real presses are >50ms). */
+#define SF3000_DEBOUNCE_N 3
+
 static void *sf3000_input_thread_fn(void *unused) {
     uint32_t prev = 0;
-    uint32_t s0 = 0, s1 = 0, s2 = 0;   /* last 3 raw samples for majority filter */
+    uint32_t stable = 0;               /* debounced published state */
+    uint8_t  cnt[32] = {0};            /* per-bit consecutive-disagreement count */
     while (1) {
-        usleep(8000);                  /* ~8ms; 3 samples ≈ 24ms latency */
+        usleep(8000);                  /* ~8ms sample */
         if (!sf3000_keys_ptr) continue;
-        s2 = s1; s1 = s0; s0 = *sf3000_keys_ptr;
-        /* Majority-of-3 per bit: a bit must be set in >=2 of the last 3 samples.
-         * Kills the 1-sample edge flicker from the rkgame+cubevol two-writer race. */
-        uint32_t filt = (s0 & s1) | (s1 & s2) | (s0 & s2);
-        sf3000_keys_filtered = filt;
-        uint32_t cur = filt & 0xFFFF;
+        uint32_t raw = *sf3000_keys_ptr;
+        /* Per-bit debounce: reject flicker in BOTH directions (press AND release).
+         * A bit must hold its new value for N samples before we accept it — this
+         * kills the rkgame+cubevol two-writer race AND short analog-stick drift
+         * blips, unlike majority-of-3 which let a 2-sample glitch through. */
+        for (int b = 0; b < 32; b++) {
+            uint32_t m = 1u << b;
+            if ((raw & m) != (stable & m)) {
+                if (++cnt[b] >= SF3000_DEBOUNCE_N) { stable ^= m; cnt[b] = 0; }
+            } else {
+                cnt[b] = 0;
+            }
+        }
+        sf3000_keys_filtered = stable;
+        uint32_t cur = stable & 0xFFFF;
         uint32_t changed = cur ^ prev;
         if (!changed) continue;
         for (int i = 0; i < sf3000_keymap_count; i++) {
