@@ -85,6 +85,7 @@ void sram_write(void) {
 	fflush(sram_file);
 	fsync(fileno(sram_file));
 	fclose(sram_file);
+	sync();   /* flush FAT metadata too: device is often powered off right after */
 }
 
 void sram_read(void) {

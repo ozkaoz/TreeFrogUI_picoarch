@@ -1989,8 +1989,8 @@ if (sf3000_use_hwdisp) {
         if (ff_skip) return;    /* FF: drop this present to keep display 60fps */
         /* SF3500: the picoarch pause menu renders to the SDL surface (320x240) →
          * disp_frame tiles that odd size. Nearest-scale ONLY the menu surface up
-         * to PANEL; game/FrogUI core frames (src != screen) keep their own
-         * aspect/integer/full scaling (disp_frame target-aspect handles them). */
+         * to PANEL; game/FrogUI core frames keep their own HW scaling + aspect
+         * (scaling EVERY frame here was far too slow and forced fullscreen). */
         if (sf3000_is_sf3500() && src == screen->pixels) {
             static uint16_t *mb = NULL;
             if (!mb) mb = (uint16_t*)malloc(PANEL_W * PANEL_H * 2);
