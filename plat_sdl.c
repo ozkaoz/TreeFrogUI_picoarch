@@ -46,15 +46,29 @@ static pthread_t sf3000_input_thread;
 extern struct sf3000_btn sf3000_keymap[];
 extern const int sf3000_keymap_count;
 
-static SDLKey sf3000_retro_to_sdlkey(int retro_id) {
-    switch (retro_id) {
-        case 4:  return SDLK_UP;      /* JOYPAD_UP    */
-        case 5:  return SDLK_DOWN;    /* JOYPAD_DOWN  */
-        case 6:  return SDLK_LEFT;    /* JOYPAD_LEFT  */
-        case 7:  return SDLK_RIGHT;   /* JOYPAD_RIGHT */
-        case 8:  return SDLK_SPACE;   /* JOYPAD_A → OK */
-        case 0:  return SDLK_LCTRL;   /* JOYPAD_B → BACK */
-        case 3:  return SDLK_ESCAPE;  /* JOYPAD_START → MENU */
+/* Each PHYSICAL button (joy_key bit) emits a FIXED SDL key. libpicofe then maps
+ * that SDL key → a retro button via its (remappable) bind table — see
+ * in_sdl_defbinds in plat_sf3000.c, whose defaults match these keys exactly. This
+ * is the "adapter": the bind table is the remap, edited in OPTION→PLAYER CONTROL
+ * and saved to the picoarch config. Every button is surfaced (X/Y/L/R/L2/R2 too),
+ * so they can be navigated AND rebound — the old retro_id→key map only covered 7
+ * buttons, which is why X/Y couldn't be remapped. */
+static SDLKey sf3000_bit_to_sdlkey(int bit) {
+    switch (bit) {
+        case 4:  return SDLK_UP;
+        case 6:  return SDLK_DOWN;
+        case 7:  return SDLK_LEFT;
+        case 5:  return SDLK_RIGHT;
+        case 13: return SDLK_SPACE;      /* A  → defbind A     */
+        case 14: return SDLK_LCTRL;      /* B  → defbind B     */
+        case 12: return SDLK_LSHIFT;     /* X  → defbind X     */
+        case 15: return SDLK_LALT;       /* Y  → defbind Y     */
+        case 10: return SDLK_TAB;        /* L1 → defbind L     */
+        case 11: return SDLK_BACKSPACE;  /* R1 → defbind R     */
+        case 8:  return SDLK_q;          /* L2 → defbind L2    */
+        case 9:  return SDLK_BACKSLASH;  /* R2 → defbind R2    */
+        case 0:  return SDLK_RCTRL;      /* SELECT             */
+        case 3:  return SDLK_RETURN;     /* START              */
         default: return SDLK_UNKNOWN;
     }
 }
@@ -90,7 +104,7 @@ static void *sf3000_input_thread_fn(void *unused) {
         for (int i = 0; i < sf3000_keymap_count; i++) {
             uint32_t bit = 1u << sf3000_keymap[i].bit;
             if (!(changed & bit)) continue;
-            SDLKey k = sf3000_retro_to_sdlkey(sf3000_keymap[i].retro_id);
+            SDLKey k = sf3000_bit_to_sdlkey(sf3000_keymap[i].bit);
             if (k == SDLK_UNKNOWN) continue;
             SDL_Event ev; memset(&ev, 0, sizeof(ev));
             ev.type = (cur & bit) ? SDL_KEYDOWN : SDL_KEYUP;

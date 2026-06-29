@@ -592,7 +592,12 @@ static void pa_input_poll(void) {
 		if (!(raw & SEL_BIT)) { if (++sel_off_cnt >= 8) menu_armed = 1; }
 		else sel_off_cnt = 0;
 		prev_raw = raw;
-		buttons = sf3000_keys_to_buttons(raw);
+		/* Game buttons come from the REMAPPABLE bind table (in_update filled
+		 * actions[] above from the per-button SDL keys the input thread emits).
+		 * This is the adapter: OPTION→PLAYER CONTROL edits these binds and they
+		 * persist in the config. Hotkeys above stay on raw physical bits so
+		 * SELECT+START always opens the menu regardless of remapping. */
+		buttons = actions[IN_BINDTYPE_PLAYER12];
 	} else {
 		buttons = actions[IN_BINDTYPE_PLAYER12];
 	}
