@@ -963,6 +963,32 @@ static int (*sf3000_sound_driver_init)(void *device_name, int sample_rate, int c
 static int (*sf3000_sound_driver_playframe)(const void *buffer, int bytes) = NULL;
 static int (*sf3000_sound_driver_deinit)(void) = NULL;
 
+/* SW output gain workaround for the stock linear volume curve (too loud at low
+ * settings; there is no global volume knob on this hardware). The level is a
+ * percent 0..100, editable in the in-game menu (Audio and video → Volume) and
+ * persisted to cubegm/sndgain.txt; also re-read on each game launch. */
+int  sf3000_snd_gain_pct = 100;          /* menu edits this (extern in menu.c) */
+static int sf3000_snd_gain_q8 = 256;     /* 8.8 fixed derived value (256 = 1.0) */
+#define SF3000_SNDGAIN_PATH "/mnt/sdcard/cubegm/sndgain.txt"
+
+/* Recompute the live gain from the percent and persist it. Called from the menu. */
+void sf3000_apply_snd_gain(void) {
+	if (sf3000_snd_gain_pct < 0)   sf3000_snd_gain_pct = 0;
+	if (sf3000_snd_gain_pct > 100) sf3000_snd_gain_pct = 100;
+	sf3000_snd_gain_q8 = sf3000_snd_gain_pct * 256 / 100;
+	FILE *f = fopen(SF3000_SNDGAIN_PATH, "w");
+	if (f) { fprintf(f, "%d\n", sf3000_snd_gain_pct); fflush(f); fsync(fileno(f)); fclose(f); sync(); }
+}
+
+static void sf3000_load_snd_gain(void) {
+	sf3000_snd_gain_pct = 100;
+	FILE *f = fopen(SF3000_SNDGAIN_PATH, "r");
+	if (f) { int p; if (fscanf(f, "%d", &p) == 1) sf3000_snd_gain_pct = p; fclose(f); }
+	if (sf3000_snd_gain_pct < 0)   sf3000_snd_gain_pct = 0;
+	if (sf3000_snd_gain_pct > 100) sf3000_snd_gain_pct = 100;
+	sf3000_snd_gain_q8 = sf3000_snd_gain_pct * 256 / 100;
+}
+
 /* Non-blocking audio: a dedicated consumer thread owns the *blocking*
  * sound_driver_playframe() DAC write. The emu thread only enqueues into this
  * SPSC ring and never blocks, so audio over/underrun can never freeze the
@@ -1016,6 +1042,17 @@ static void *sf3000_audio_thread_fn(void *unused)
 		if (!have_chunk) {
 			usleep(2000);  /* underrun: wait for the emu thread to refill */
 			continue;
+		}
+
+		/* Software output gain (volume-curve workaround). The stock level→volume
+		 * mapping is linear, so low system-volume settings stay loud. Scaling our
+		 * own output down lets the user run the system volume higher, making the
+		 * low end actually quiet. q8 fixed-point; 256 = 1.0 = unchanged. */
+		if (sf3000_snd_gain_q8 < 256) {
+			for (int i = 0; i < SF3000_ACHUNK; i++) {
+				chunk[i].left  = (int16_t)(((int)chunk[i].left  * sf3000_snd_gain_q8) >> 8);
+				chunk[i].right = (int16_t)(((int)chunk[i].right * sf3000_snd_gain_q8) >> 8);
+			}
 		}
 
 		/* Blocks until the DAC drains — but on THIS thread, not the emu. */
@@ -1082,6 +1119,7 @@ static int plat_sound_init(void)
 	audio.out_sample_rate = SAMPLE_RATE;
 
 	/* Start the non-blocking audio consumer thread (it init's the DAC itself). */
+	sf3000_load_snd_gain();   /* re-read cubegm/sndgain.txt each game launch */
 	sf3000_aring_w = sf3000_aring_r = 0;
 	sf3000_audio_init_rc = 0;
 	if (!sf3000_audio_running) {

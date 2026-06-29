@@ -560,6 +560,15 @@ static int mh_scale_size(int id, int keys) {
 }
 static const char *men_scale_effect[] = { "None", "DMG", "LCD", "Scanline", NULL};
 
+#ifdef PLATFORM_SF3000
+extern int sf3000_snd_gain_pct;            /* SW output gain percent (plat_sdl.c) */
+extern void sf3000_apply_snd_gain(void);
+static const char h_sf3000_volume[] =
+	"Lowers this app's audio output so the system's low\n"
+	"volume steps are actually quiet (the stock volume\n"
+	"curve is loud). 100 = full. Saved to sndgain.txt.";
+#endif
+
 static menu_entry e_menu_video_options[] =
 {
 	mee_onoff_h      ("Show FPS",                 0, show_fps, 1, h_show_fps),
@@ -573,6 +582,9 @@ static menu_entry e_menu_video_options[] =
 	mee_handler_id_h (             "", MA_VID_BLANK, NULL, NULL),
 	mee_onoff_h      ("Optimize text",            0, optimize_text, 1, h_optimize_text),
 	mee_range_h      ("Audio buffer",             0, audio_buffer_size, 1, 15, h_audio_buffer_size),
+#ifdef PLATFORM_SF3000
+	mee_range_h      ("Volume %",                 0, sf3000_snd_gain_pct, 0, 100, h_sf3000_volume),
+#endif
 	mee_end,
 };
 
@@ -597,6 +609,9 @@ static int menu_loop_video_options(int id, int keys)
 	me_loop_d(e_menu_video_options, &sel, menu_loop_video_prep, NULL);
 	scale_update_scaler();
 
+#ifdef PLATFORM_SF3000
+	sf3000_apply_snd_gain();   /* recompute + persist the volume gain on exit */
+#endif
 	return 0;
 }
 
