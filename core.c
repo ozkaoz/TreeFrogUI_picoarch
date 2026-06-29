@@ -565,8 +565,18 @@ static void pa_input_poll(void) {
 		/* Fire each combo only on the rising edge (newly fully-pressed this poll),
 		 * else it repeats every frame held. */
 		#define COMBO_EDGE(m) (((raw & (m)) == (m)) && ((prev_raw & (m)) != (m)))
-		if (COMBO_EDGE(SEL_BIT | START_BIT))
+		/* MENU is special: menu_loop() blocks, so prev_raw is frozen while it's
+		 * open. If SELECT+START is still held (or the bits flicker) on return, a
+		 * plain edge re-fires and the menu strobes open/closed — which on SF3500
+		 * also churns the driver geometry and garbles the screen. So LATCH it:
+		 * fire once, then refuse until SELECT is fully released. */
+		static int menu_armed = 1;
+		static int sel_off_cnt = 0;
+		if (menu_armed && (raw & (SEL_BIT | START_BIT)) == (SEL_BIT | START_BIT)) {
+			menu_armed = 0;
+			sel_off_cnt = 0;
 			handle_emu_action(EACTION_MENU);
+		}
 		else if (COMBO_EDGE(SEL_BIT | L2_BIT))
 			handle_emu_action(EACTION_LOAD_STATE);
 		else if (COMBO_EDGE(SEL_BIT | R2_BIT))
@@ -575,6 +585,12 @@ static void pa_input_poll(void) {
 			handle_emu_action(EACTION_TOGGLE_FF);  /* SELECT+R1 = fast-forward */
 		#undef COMBO_EDGE
 
+		/* Re-arm the menu only after SELECT has been CONTINUOUSLY released for a
+		 * stretch. A plain "SELECT==0" re-arm let the two-writer bit-flicker (a
+		 * 1-2 poll dropout) re-arm instantly, so the menu strobed open/closed and
+		 * only ever showed one black re-init frame. Require ~8 clean polls. */
+		if (!(raw & SEL_BIT)) { if (++sel_off_cnt >= 8) menu_armed = 1; }
+		else sel_off_cnt = 0;
 		prev_raw = raw;
 		buttons = sf3000_keys_to_buttons(raw);
 	} else {
