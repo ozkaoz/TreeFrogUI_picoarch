@@ -1949,11 +1949,18 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
      * handles panel-size frames cleanly — proven by rkgame's own FrogUI render).
      * The SW transpose path is SF3000-geometry-tuned → squish + page-flip churn
      * on SF3500, so route everything (incl. nearest/menu frames) through HW. */
+    /* EXPERIMENT: SF3000 v1 FrogUI panel-size frames via the HW disp_frame path
+     * (like SF3500) instead of the SW transpose. Falls back to SW if init fails. */
+    sf3000_detect_device();
+    int sf3000_menu_hw = (g_dev_id == TF_DEV_SF3000 && src != screen->pixels &&
+                          width == PANEL_W && height == PANEL_H);
     if (!sf3000_use_hwdisp &&
-        (sf3000_is_r36sx() || sf3000_is_sf3500() || scale_filter == SCALE_FILTER_BILINEAR)) {
+        (sf3000_is_r36sx() || sf3000_is_sf3500() || sf3000_menu_hw ||
+         scale_filter == SCALE_FILTER_BILINEAR)) {
         if (hwdisp_init() == 0) {
             sf3000_use_hwdisp = 1;
-            fprintf(stderr, "sf3000_fb_blit: HW path active\n");
+            fprintf(stderr, "sf3000_fb_blit: HW path active%s\n",
+                    sf3000_menu_hw ? " (sf3000 menu experiment)" : "");
         }
     }
 

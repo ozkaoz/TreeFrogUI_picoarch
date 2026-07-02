@@ -570,8 +570,17 @@ static void pa_input_poll(void) {
 		 * plain edge re-fires and the menu strobes open/closed — which on SF3500
 		 * also churns the driver geometry and garbles the screen. So LATCH it:
 		 * fire once, then refuse until SELECT is fully released. */
+		/* The FrogUI launcher core gets NO hotkeys: the pause menu makes no
+		 * sense there, and reopening/leaving it corrupts the launcher screen
+		 * (fb-write path). SELECT/START still reach FrogUI as plain buttons. */
+		extern int g_is_frogui;
 		static int menu_armed = 1;
 		static int sel_off_cnt = 0;
+		if (g_is_frogui) {
+			prev_raw = raw;
+			buttons = actions[IN_BINDTYPE_PLAYER12];
+			goto frogui_no_hotkeys;
+		}
 		if (menu_armed && (raw & (SEL_BIT | START_BIT)) == (SEL_BIT | START_BIT)) {
 			menu_armed = 0;
 			sel_off_cnt = 0;
@@ -598,6 +607,7 @@ static void pa_input_poll(void) {
 		 * persist in the config. Hotkeys above stay on raw physical bits so
 		 * SELECT+START always opens the menu regardless of remapping. */
 		buttons = actions[IN_BINDTYPE_PLAYER12];
+frogui_no_hotkeys: ;
 	} else {
 		buttons = actions[IN_BINDTYPE_PLAYER12];
 	}

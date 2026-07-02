@@ -306,7 +306,7 @@ int screenshot(void) {
 #include <sys/mman.h>
 #include <linux/fb.h>
 #include <stdlib.h>
-static int g_is_frogui = 0;
+int g_is_frogui = 0;
 static void fb1_clear(void) {
 	int fd = open("/dev/fb1", O_RDWR);
 	if (fd < 0) return;
