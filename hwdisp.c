@@ -436,6 +436,19 @@ int hwdisp_present_direct(const void *src, int w, int h, int pitch_bytes) {
         uint16_t *b = panel_build(src, w, h, pitch_bytes, g_panel_scale == 0);
         if (b) { psrc = b; pw = PANEL_PW; ph = PANEL_PH; ppitch = PANEL_PW*2; }
     }
+    /* disp_frame DMA-reads src asynchronously; handing it the caller's live
+     * buffer races the next frame's rendering (font/pixel shimmer during menu
+     * scrolling on R36SX). Stage into ping-pong buffers so the engine always
+     * scans a stable copy. */
+    static uint16_t *g_dpp[2];
+    static int g_dppi;
+    if (!g_dpp[0]) { g_dpp[0] = (uint16_t*)malloc(PANEL_PW*PANEL_PH*2); g_dpp[1] = (uint16_t*)malloc(PANEL_PW*PANEL_PH*2); }
+    if (g_dpp[0] && g_dpp[1] && pw <= PANEL_PW && ph <= PANEL_PH) {
+        uint16_t *dst = g_dpp[g_dppi]; g_dppi ^= 1;
+        for (int y = 0; y < ph; y++)
+            memcpy(dst + (size_t)y*pw, (const uint8_t*)psrc + (size_t)y*ppitch, (size_t)pw*2);
+        psrc = dst; ppitch = pw*2;
+    }
     if (lg) DBG("DBG present_direct#%d: pre disp_frame %dx%d scale=%d\n", s_n, pw, ph, g_panel_scale);
     int rv = p_disp((void *)psrc, pw, ph, ppitch);
     if (lg) DBG("DBG present_direct#%d: post rv=%d\n", s_n, rv);
