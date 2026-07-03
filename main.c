@@ -856,11 +856,30 @@ int main(int argc, char **argv) {
 		if (g_auto_resume) {
 			char lg_core[512], lg_rom[512];
 			if (read_last_game(lg_core, sizeof(lg_core), lg_rom, sizeof(lg_rom))) {
-				DBG("DBG main: auto-resume redirect → %s + %s\n",
-				        lg_core, lg_rom);
-				setenv("PICOARCH_AUTO_RESUME", "1", 1);
-				execl(picoarch_for_core(lg_core), "picoarch", lg_core, lg_rom, NULL);
-				/* fall through on execl failure */
+				/* ANTI-SOFT-BRICK: a stale/invalid marker (missing rom) or a
+				 * game that dies instantly would relaunch forever: black
+				 * screen until the user pulls the card and edits
+				 * last_game.txt on a PC. Validate the target and cap resume
+				 * attempts per boot (/tmp resets on power cycle; the counter
+				 * is cleared once content actually loads). */
+				int tries = 0;
+				FILE *tf = fopen("/tmp/resume_tries", "r");
+				if (tf) { if (fscanf(tf, "%d", &tries) != 1) tries = 0; fclose(tf); }
+				if (access(lg_rom, F_OK) != 0 || access(lg_core, F_OK) != 0) {
+					DBG("DBG main: auto-resume target missing (%s) → clearing marker\n", lg_rom);
+					clear_last_game();
+				} else if (tries >= 2) {
+					DBG("DBG main: auto-resume failed %d times this boot → clearing marker\n", tries);
+					clear_last_game();
+				} else {
+					tf = fopen("/tmp/resume_tries", "w");
+					if (tf) { fprintf(tf, "%d", tries + 1); fclose(tf); }
+					DBG("DBG main: auto-resume redirect → %s + %s (try %d)\n",
+					        lg_core, lg_rom, tries + 1);
+					setenv("PICOARCH_AUTO_RESUME", "1", 1);
+					execl(picoarch_for_core(lg_core), "picoarch", lg_core, lg_rom, NULL);
+					/* fall through on execl failure */
+				}
 			}
 		}
 	}
@@ -944,6 +963,7 @@ int main(int argc, char **argv) {
 		quit(-1);
 	}
 	dbg_log("DBG M6: content loaded, entering run loop\n");
+	unlink("/tmp/resume_tries");   /* content runs: reset the auto-resume failure cap */
 
 	/* Hide cubevol's battery/volume OSD (/dev/fb1) during gameplay. Skipped
 	 * for FrogUI (the menu core) so the menu still shows battery. */
