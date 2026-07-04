@@ -1410,6 +1410,14 @@ static int menu_loop_savestate(int is_loading)
 	if (!(state_slot_flags & (1 << menu_sel)) && is_loading)
 		menu_sel = menu_sel_max;
 
+	/* Drain the OK button that opened this picker before accepting input. A
+	 * held or flickering A would otherwise re-fire save every poll: harmless on
+	 * tiny states, but on big cores (picodrive ~663KB/state) the repeated large
+	 * allocations exhaust RAM, saves start failing, the menu stays open, and it
+	 * storms the SD until the console appears frozen. One save per press. */
+	while (in_menu_wait_any(NULL, 50) & (PBTN_MOK | PBTN_MBACK))
+		;
+
 	for (;;)
 	{
 		draw_savestate_menu(menu_sel, is_loading);
