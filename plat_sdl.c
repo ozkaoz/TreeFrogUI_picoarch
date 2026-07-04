@@ -30,6 +30,29 @@ static SDL_Surface* screen;
 
 int sf3000_use_hwdisp = 0;
 
+/* Self-healing HW→SW fallback (SF3000-class disp_frame devices). Some units
+ * can't render via the HW path (black screen / hang after logo). zhijack sets
+ * TF_FORCE_SW=1 once it has detected that (watchdog + crash count) and dropped
+ * a marker on the SD, so every later boot skips HW entirely. Read once. */
+int sf3000_force_sw(void) {
+    static int v = -1;
+    if (v < 0) v = getenv("TF_FORCE_SW") ? 1 : 0;
+    return v;
+}
+
+/* Breadcrumb that proves the HW path actually produced frames this boot: written
+ * once after a handful of successful HW presents. zhijack's watchdog treats its
+ * ABSENCE (process hung, or crashed before it appeared) as "HW is broken here". */
+static void sf3000_hw_heartbeat(void) {
+    static int frames = 0, done = 0;
+    if (done) return;
+    if (++frames >= 8) {
+        int fd = open("/tmp/hw_rendered", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd >= 0) close(fd);
+        done = 1;
+    }
+}
+
 /* cubevol shared memory: ftok("/tmp/joy_key", 'a') → 4-byte key state.
    Low 16 bits = button bitmask (bit set = pressed). */
 volatile uint32_t *sf3000_keys_ptr = NULL;
@@ -1643,26 +1666,29 @@ int sf3000_fb_init(void) {
 
     sf3000_use_hwdisp = 0;
 
-    /* WARM-BOOT: previous picoarch left HCGE active (game in bilinear).
-     * Marker contains parent PID; we early-init hwdisp here so FrogUI
-     * frames present through driver.so instead of squishing on SW path. */
-    {
-        FILE *mf = fopen("/tmp/picoarch_hcge_was_active", "r");
-        if (mf) {
-            int marker_ppid = -1;
-            (void)!fscanf(mf, "%d", &marker_ppid);
-            fclose(mf);
-            unlink("/tmp/picoarch_hcge_was_active");
-            if (marker_ppid == (int)getppid()) {
-                extern int hwdisp_init(void);
-                if (hwdisp_init() == 0) {
-                    sf3000_use_hwdisp = 1;
-                    fprintf(stderr, "sf3000_fb_init: hwdisp early-init (warm boot)\n");
-                }
-            } else {
-                fprintf(stderr, "sf3000_fb_init: stale marker (ppid %d != %d) — ignored\n",
-                        marker_ppid, (int)getppid());
-            }
+    /* Consume the warm-boot marker if present (previous picoarch left HCGE
+     * active). We no longer NEED it to decide HW — see the unconditional
+     * early-init below — but clear it so it can't go stale. */
+    unlink("/tmp/picoarch_hcge_was_active");
+
+    /* SF3000 menu HW, from a COLD boot. FrogUI's 854x480 panel frames squish on
+     * the SW transpose path, so present them through driver.so instead. This
+     * MUST happen here (fb_init) not at blit time: fb_init runs before the audio
+     * thread starts (plat_sound_init), so hwdisp_init/disp_frame can't race the
+     * driver's internal mutex. Doing it at blit time raced that mutex → random
+     * SIGABRT (the old "sf3000 menu experiment"). Skipped when a prior boot
+     * proved HW is broken here (force_sw self-heal). */
+    extern int sf3000_is_r36sx(void);
+    extern int sf3000_is_gb350(void);
+    /* SF3500 already returned early above; so "not R36SX and not GB350" == SF3000. */
+    if (!sf3000_use_hwdisp && !sf3000_force_sw() &&
+        !sf3000_is_r36sx() && !sf3000_is_gb350()) {
+        extern int hwdisp_init(void);
+        if (hwdisp_init() == 0) {
+            sf3000_use_hwdisp = 1;
+            fprintf(stderr, "sf3000_fb_init: hwdisp early-init (SF3000 cold menu)\n");
+        } else {
+            fprintf(stderr, "sf3000_fb_init: hwdisp early-init failed, SW fallback\n");
         }
     }
     return 0;
@@ -1949,23 +1975,23 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
      * handles panel-size frames cleanly — proven by rkgame's own FrogUI render).
      * The SW transpose path is SF3000-geometry-tuned → squish + page-flip churn
      * on SF3500, so route everything (incl. nearest/menu frames) through HW. */
-    /* EXPERIMENT: SF3000 v1 FrogUI panel-size frames via the HW disp_frame path
-     * (like SF3500) instead of the SW transpose. Falls back to SW if init fails. */
+    /* SF3000 menu stays on the SW transpose path: its driver's disp_frame ABORTS
+     * on panel-size (854x480) frames (pthread mutex assertion → SIGABRT), only
+     * small game frames present cleanly. So HW is for R36SX (fb-write), SF3500
+     * (its driver handles panel frames), and bilinear game frames. */
     sf3000_detect_device();
-    int sf3000_menu_hw = (g_dev_id == TF_DEV_SF3000 && src != screen->pixels &&
-                          width == PANEL_W && height == PANEL_H);
-    if (!sf3000_use_hwdisp &&
-        (sf3000_is_r36sx() || sf3000_is_sf3500() || sf3000_menu_hw ||
+    if (!sf3000_use_hwdisp && !sf3000_force_sw() &&
+        (sf3000_is_r36sx() || sf3000_is_sf3500() ||
          scale_filter == SCALE_FILTER_BILINEAR)) {
         if (hwdisp_init() == 0) {
             sf3000_use_hwdisp = 1;
-            fprintf(stderr, "sf3000_fb_blit: HW path active%s\n",
-                    sf3000_menu_hw ? " (sf3000 menu experiment)" : "");
+            fprintf(stderr, "sf3000_fb_blit: HW path active\n");
         }
     }
 
 
 if (sf3000_use_hwdisp) {
+        sf3000_hw_heartbeat();  /* mark HW as alive once it has drawn a few frames */
         /* Fast-forward: frame_limit paces emulation at (level+1)*60fps; here we
          * present only 1 of (level+1) frames so the display stays 60fps and the
          * game runs (level+1)x. frame_limit runs first (below) → paces every

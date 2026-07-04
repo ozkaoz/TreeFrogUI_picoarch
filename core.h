@@ -48,6 +48,7 @@ void save_relative_path(char *buf, size_t len, const char *basename);
 
 void sram_read(void);
 void sram_write(void);
+void sram_autosave(void);
 
 bool state_allowed(void);
 void state_file_name(char *name, size_t size, int slot);

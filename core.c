@@ -88,6 +88,38 @@ void sram_write(void) {
 	sync();   /* flush FAT metadata too: device is often powered off right after */
 }
 
+/* Periodic in-game battery-save flush. picoarch only wrote SRAM on pause-menu
+ * open / clean exit, so with the game-switcher flow (power off straight from a
+ * game) an in-game save made since the last menu open was lost. Called every
+ * frame; rate-limited to ~10s by a frame counter (no RTC on this device), and
+ * only writes when the SRAM buffer actually changed, so idle games cost one
+ * memcmp and never touch the card. */
+void sram_autosave(void) {
+	static void *cache = NULL;
+	static size_t cache_size = 0;
+	static unsigned fc = 0;
+
+	if ((++fc % 600) != 0) return;   /* ~every 10s at 60fps */
+
+	size_t sram_size = current_core.retro_get_memory_size(RETRO_MEMORY_SAVE_RAM);
+	if (!sram_size) return;
+	void *sram = current_core.retro_get_memory_data(RETRO_MEMORY_SAVE_RAM);
+	if (!sram) return;
+
+	if (cache_size != sram_size) {   /* first sight / size change: baseline only */
+		free(cache);
+		cache = malloc(sram_size);
+		cache_size = sram_size;
+		if (cache) memcpy(cache, sram, sram_size);
+		return;
+	}
+	if (!cache || memcmp(cache, sram, sram_size) == 0) return;  /* unchanged */
+
+	memcpy(cache, sram, sram_size);
+	sram_write();
+	DBG("DBG sram_autosave: SRAM changed → flushed\n");
+}
+
 void sram_read(void) {
 	char filename[MAX_PATH];
 	FILE *sram_file = NULL;

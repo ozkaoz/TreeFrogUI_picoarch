@@ -1007,6 +1007,8 @@ int main(int argc, char **argv) {
 #endif
 		if (!should_quit)
 			plat_video_flip();
+		if (!g_is_frogui)
+			sram_autosave();   /* flush in-game saves without waiting for a clean exit */
 	} while (!should_quit);
 
 	if (!g_is_frogui)   /* don't count time spent in the menu */
