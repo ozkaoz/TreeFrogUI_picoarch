@@ -166,7 +166,7 @@ void save_game_screenshot(void) {
 	plat_dump_screen(name);   /* writes name + ".bmp" */
 }
 
-int state_read(void) {
+int pa_state_read(void) {
 	char filename[MAX_PATH];
 	FILE *state_file = NULL;
 	void *state = NULL;
@@ -210,7 +210,7 @@ error:
 	return ret;
 }
 
-int state_write(void) {
+int pa_state_write(void) {
 	char filename[MAX_PATH];
 	FILE *state_file = NULL;
 	void *state = NULL;
@@ -265,7 +265,7 @@ int state_resume(void) {
 	int ret = 0;
 	if (resume_slot != -1) {
 		state_slot = resume_slot;
-		ret = state_read();
+		ret = pa_state_read();
 		resume_slot = -1;
 	}
 	return ret;
@@ -607,6 +607,7 @@ static void pa_input_poll(void) {
 		 * (fb-write path). SELECT/START still reach FrogUI as plain buttons. */
 		extern int g_is_frogui;
 		static int menu_armed = 1;
+		static int ss_armed = 1;   /* save/load-state latch */
 		static int sel_off_cnt = 0;
 		if (g_is_frogui) {
 			prev_raw = raw;
@@ -618,10 +619,19 @@ static void pa_input_poll(void) {
 			sel_off_cnt = 0;
 			handle_emu_action(EACTION_MENU);
 		}
-		else if (COMBO_EDGE(SEL_BIT | L2_BIT))
+		/* Save/load state are LATCHED like the menu: fire once, then refuse until
+		 * SELECT is fully released. The two-writer input race flickers L2/R2 while
+		 * SELECT is held, and a plain edge re-fired the save every flicker → on a
+		 * big-state core (picodrive ~663KB) hundreds of rapid saves exhaust RAM,
+		 * serialize starts faulting, and the console hard-freezes. One per hold. */
+		else if (ss_armed && COMBO_EDGE(SEL_BIT | L2_BIT)) {
+			ss_armed = 0;
 			handle_emu_action(EACTION_LOAD_STATE);
-		else if (COMBO_EDGE(SEL_BIT | R2_BIT))
+		}
+		else if (ss_armed && COMBO_EDGE(SEL_BIT | R2_BIT)) {
+			ss_armed = 0;
 			handle_emu_action(EACTION_SAVE_STATE);
+		}
 		else if (COMBO_EDGE(SEL_BIT | R1_BIT))
 			handle_emu_action(EACTION_TOGGLE_FF);  /* SELECT+R1 = fast-forward */
 		#undef COMBO_EDGE
@@ -630,7 +640,7 @@ static void pa_input_poll(void) {
 		 * stretch. A plain "SELECT==0" re-arm let the two-writer bit-flicker (a
 		 * 1-2 poll dropout) re-arm instantly, so the menu strobed open/closed and
 		 * only ever showed one black re-init frame. Require ~8 clean polls. */
-		if (!(raw & SEL_BIT)) { if (++sel_off_cnt >= 8) menu_armed = 1; }
+		if (!(raw & SEL_BIT)) { if (++sel_off_cnt >= 8) { menu_armed = 1; ss_armed = 1; } }
 		else sel_off_cnt = 0;
 		prev_raw = raw;
 		/* Game buttons come from the REMAPPABLE bind table (in_update filled

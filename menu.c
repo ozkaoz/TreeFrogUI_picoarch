@@ -97,9 +97,9 @@ static int emu_save_load_game(int load, int unused)
 	int ret;
 
 	if (load)
-		ret = state_read();
+		ret = pa_state_read();
 	else
-		ret = state_write();
+		ret = pa_state_write();
 
 	return ret;
 }

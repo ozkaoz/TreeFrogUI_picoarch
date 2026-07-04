@@ -533,7 +533,7 @@ void handle_emu_action(emu_action action)
 		if (g_auto_resume && !g_is_frogui) {
 			int prev = state_slot;
 			state_slot = 9;  /* reserved auto-resume slot (10th) */
-			state_write();
+			pa_state_write();
 			state_slot = prev;
 			sync();
 			DBG("DBG auto-resume: state saved to slot 99 (menu open)\n");
@@ -559,10 +559,10 @@ void handle_emu_action(emu_action action)
 				fb1_menu_exit();
 			} else if (status >= kStatusLoadSlot) {
 				state_slot = status - kStatusLoadSlot;
-				state_read();
+				pa_state_read();
 			} else if (status >= kStatusSaveSlot) {
 				state_slot = status - kStatusSaveSlot;
-				state_write();
+				pa_state_write();
 			}
 
 			// release that menu key
@@ -589,10 +589,10 @@ void handle_emu_action(emu_action action)
 		plat_video_set_msg(NULL, 0, 0);
 		break;
 	case EACTION_SAVE_STATE:
-		state_write();
+		pa_state_write();
 		break;
 	case EACTION_LOAD_STATE:
-		state_read();
+		pa_state_read();
 		break;
 	case EACTION_TOGGLE_FF:
 		toggle_fast_forward(0);
@@ -1028,7 +1028,7 @@ int quit(int code) {
 	if (g_auto_resume && !g_is_frogui && current_core.retro_unload_game) {
 		int prev = state_slot;
 		state_slot = 9;  /* reserved auto-resume slot (10th) */
-		state_write();
+		pa_state_write();
 		state_slot = prev;
 		sync();
 		DBG("DBG quit: auto-resume final save to slot 99\n");

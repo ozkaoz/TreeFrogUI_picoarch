@@ -53,8 +53,8 @@ void sram_autosave(void);
 bool state_allowed(void);
 void state_file_name(char *name, size_t size, int slot);
 void save_game_screenshot(void);
-int state_read(void);
-int state_write(void);
+int pa_state_read(void);
+int pa_state_write(void);
 int state_resume(void);
 
 unsigned disc_get_count(void);
