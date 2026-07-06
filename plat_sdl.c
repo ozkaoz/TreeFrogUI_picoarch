@@ -1671,22 +1671,19 @@ int sf3000_fb_init(void) {
      * early-init below — but clear it so it can't go stale. */
     unlink("/tmp/picoarch_hcge_was_active");
 
-    /* SF3000 menu HW, from a COLD boot. FrogUI's 854x480 panel frames squish on
-     * the SW transpose path, so present them through driver.so instead. This
-     * MUST happen here (fb_init) not at blit time: fb_init runs before the audio
-     * thread starts (plat_sound_init), so hwdisp_init/disp_frame can't race the
-     * driver's internal mutex. Doing it at blit time raced that mutex → random
-     * SIGABRT (the old "sf3000 menu experiment"). Skipped when a prior boot
-     * proved HW is broken here (force_sw self-heal). */
-    extern int sf3000_is_r36sx(void);
-    extern int sf3000_is_gb350(void);
-    /* SF3500 already returned early above; so "not R36SX and not GB350" == SF3000. */
-    if (!sf3000_use_hwdisp && !sf3000_force_sw() &&
-        !sf3000_is_r36sx() && !sf3000_is_gb350()) {
+    /* Init the display driver HERE (fb_init) for ALL devices, not lazily at blit
+     * time. fb_init runs BEFORE the audio thread starts (plat_sound_init), so the
+     * driver's video init can't race the audio thread's sound_driver_init on the
+     * driver's internal error-checking mutex. Doing it at blit time (audio thread
+     * already running) raced that mutex → `pthread_mutex_lock: __owner==0` SIGABRT
+     * crash-loop (seen on R36SX and the old SF3000 menu experiment). It also gives
+     * SF3000 a correct-aspect HW menu from cold (SW transpose squishes 854x480).
+     * SF3500 already inited + returned early above. Skipped under force_sw. */
+    if (!sf3000_use_hwdisp && !sf3000_force_sw()) {
         extern int hwdisp_init(void);
         if (hwdisp_init() == 0) {
             sf3000_use_hwdisp = 1;
-            fprintf(stderr, "sf3000_fb_init: hwdisp early-init (SF3000 cold menu)\n");
+            fprintf(stderr, "sf3000_fb_init: hwdisp early-init ok\n");
         } else {
             fprintf(stderr, "sf3000_fb_init: hwdisp early-init failed, SW fallback\n");
         }
