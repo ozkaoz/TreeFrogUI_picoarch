@@ -1432,10 +1432,10 @@ int plat_reinit(void)
 		sf3000_sound_driver_deinit();
 	}
 	if (sf3000_sound_driver_init) {
-		sf3000_sound_driver_init(NULL, sample_rate, 2);
+		sf3000_sound_driver_init(NULL, SAMPLE_RATE, 2);
 	}
 	audio.in_sample_rate = sample_rate;
-	audio.out_sample_rate = sample_rate;
+	audio.out_sample_rate = SAMPLE_RATE;
 #else
 	audio.in_sample_rate = sample_rate;
 	plat_sound_resize_buffer();
