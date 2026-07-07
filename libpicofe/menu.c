@@ -291,7 +291,10 @@ static void menu_draw_selection(int x, int y, int w)
 	if (menu_font_ready()) {
 		int pw = g_menuscreen_w - x - 4;
 		if (pw < w) pw = w;
-		menu_round_fill(x, y - 2, pw, me_mfont_h, me_mfont_h / 4, 0xFFFF);
+		/* Stay within this row's own [y, y+me_mfont_h) band - a y-2 start
+		 * with the same height bled 2px into the row above, wiping thin
+		 * glyph strokes (e.g. "I") there when this row became selected. */
+		menu_round_fill(x, y, pw, me_mfont_h, me_mfont_h / 4, 0xFFFF);
 		return;
 	}
 
@@ -1551,9 +1554,14 @@ static void draw_key_config(const me_bind_action *opts, int opt_cnt, int player_
 	y += 2 * me_mfont_h;
 	menu_draw_selection(x - me_mfont_w * 2, y + sel * me_mfont_h, w + 2 * me_mfont_w);
 
-	for (i = 0; i < opt_cnt; i++, y += me_mfont_h)
+	for (i = 0; i < opt_cnt; i++, y += me_mfont_h) {
+		int sel_row = menu_font_ready() && (i == sel);
+		int save_col = menu_text_color;
+		if (sel_row) menu_text_color = menu_sel_text_color;
 		text_out16(x, y, "%s : %s", opts[i].name,
 			action_binds(player_idx, opts[i].mask, dev_id));
+		if (sel_row) menu_text_color = save_col;
+	}
 
 	menu_separation();
 
