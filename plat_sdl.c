@@ -2074,16 +2074,22 @@ if (sf3000_use_hwdisp) {
          * to PANEL; game/FrogUI core frames keep their own HW scaling + aspect
          * (scaling EVERY frame here was far too slow and forced fullscreen). */
         if (sf3000_is_sf3500() && src == screen->pixels) {
-            static uint16_t *mb = NULL;
-            if (!mb) mb = (uint16_t*)malloc(PANEL_W * PANEL_H * 2);
-            if (mb) {
+            /* disp_frame DMA-reads src asynchronously; handing it a single
+             * static buffer races the next redraw's scaling (glyphs/pixels
+             * vanish while scrolling the pause menu). Ping-pong buffers so
+             * the engine always scans a stable copy. */
+            static uint16_t *mb[2];
+            static int mbi;
+            if (!mb[0]) { mb[0] = (uint16_t*)malloc(PANEL_W * PANEL_H * 2); mb[1] = (uint16_t*)malloc(PANEL_W * PANEL_H * 2); }
+            uint16_t *dst = mb[mbi]; mbi ^= 1;
+            if (dst) {
                 const uint16_t *s = (const uint16_t*)src; int sp = pitch/2;
                 for (int y = 0; y < PANEL_H; y++) {
                     const uint16_t *srow = s + (size_t)(y * height / PANEL_H) * sp;
-                    uint16_t *drow = mb + (size_t)y * PANEL_W;
+                    uint16_t *drow = dst + (size_t)y * PANEL_W;
                     for (int x = 0; x < PANEL_W; x++) drow[x] = srow[x * width / PANEL_W];
                 }
-                src = mb; width = PANEL_W; height = PANEL_H; pitch = PANEL_W * 2;
+                src = dst; width = PANEL_W; height = PANEL_H; pitch = PANEL_W * 2;
             }
         }
         if (!(sf3000_is_r36sx() && hwdisp_present_direct(src, width, height, pitch)))

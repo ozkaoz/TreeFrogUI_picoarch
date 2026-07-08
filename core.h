@@ -70,5 +70,6 @@ void core_apply_cheats(struct cheats *cheats);
 void core_unload_content(void);
 const char **core_extensions(void);
 void core_unload(void);
+void core_frame_time_tick(void);
 
 #endif

@@ -34,6 +34,7 @@ static char config_dir[MAX_PATH];
 static char save_dir[MAX_PATH];
 static char system_dir[MAX_PATH];
 static struct retro_disk_control_ext_callback disk_control_ext;
+static struct retro_frame_time_callback frame_time_cb_info;
 
 static uint32_t buttons = 0;
 int current_pixel_format = RETRO_PIXEL_FORMAT_0RGB1555;
@@ -421,6 +422,17 @@ static bool pa_environment(unsigned cmd, void *data) {
 		}
 		break;
 	}
+	case RETRO_ENVIRONMENT_SET_FRAME_TIME_CALLBACK: { /* 21 */
+		const struct retro_frame_time_callback *var =
+			(const struct retro_frame_time_callback *)data;
+
+		if (var) {
+			memcpy(&frame_time_cb_info, var, sizeof(struct retro_frame_time_callback));
+		} else {
+			memset(&frame_time_cb_info, 0, sizeof(struct retro_frame_time_callback));
+		}
+		break;
+	}
 	case RETRO_ENVIRONMENT_GET_VARIABLE: { /* 15 */
 		struct retro_variable *var = (struct retro_variable *)data;
 		if (var && var->key) {
@@ -702,6 +714,7 @@ int core_open(const char *corefile, const char *tag_name) {
 	dlopen("libstdc++.so.6", RTLD_NOW | RTLD_GLOBAL);
 
 	memset(&current_core, 0, sizeof(current_core));
+	memset(&frame_time_cb_info, 0, sizeof(frame_time_cb_info));
 	current_core.handle = dlopen(corefile, RTLD_NOW | RTLD_GLOBAL);
 
 	if (!current_core.handle) {
@@ -850,6 +863,14 @@ const char **core_extensions(void) {
 		return extensions->list;
 
 	return NULL;
+}
+
+void core_frame_time_tick(void) {
+	/* Pass the fixed reference interval, not a measured delta: picoarch
+	 * paces frames at the core's reported fps, and ecwolf itself falls
+	 * back to reference when its dynamic-fps option is off. */
+	if (frame_time_cb_info.callback)
+		frame_time_cb_info.callback(frame_time_cb_info.reference);
 }
 
 void core_unload(void) {

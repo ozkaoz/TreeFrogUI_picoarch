@@ -991,6 +991,7 @@ int main(int argc, char **argv) {
 	do {
 		count_fps();
 		adjust_audio();
+		core_frame_time_tick();
 #ifdef PLATFORM_SF3000
 		if (g_rw_buf && rewind_held() && rewind_back()) {
 			current_core.retro_run();          /* render restored frame */
