@@ -839,6 +839,17 @@ static void minui_draw_main(menu_entry *menu, int sel) {
 		ly += rh;
 	}
 
+	/* core library name + version (from retro_system_info), under the thumbnail */
+	extern char core_lib_name[64], core_lib_version[32];
+	if (core_lib_name[0]) {
+		char cinfo[96];
+		if (core_lib_version[0])
+			snprintf(cinfo, sizeof(cinfo), "%s %s", core_lib_name, core_lib_version);
+		else
+			snprintf(cinfo, sizeof(cinfo), "%s", core_lib_name);
+		menu_font_draw_text((uint16_t *)g_menuscreen_ptr, W, H, tx, ty + th + 6 + tdy, cinfo, WHITE);
+	}
+
 	const char *leg = "B-BACK   A-OKAY";
 	int lw = menu_font_measure(leg);
 	menu_font_draw_text((uint16_t *)g_menuscreen_ptr, W, H, W - lw - pad, H - rh + tdy, leg, WHITE);

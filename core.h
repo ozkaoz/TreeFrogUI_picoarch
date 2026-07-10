@@ -38,6 +38,8 @@ extern struct cheats *cheats;
 
 extern double sample_rate;
 extern double frame_rate;
+extern char core_lib_name[64];
+extern char core_lib_version[32];
 extern double aspect_ratio;
 extern unsigned audio_buffer_size_override;
 extern int state_slot;

@@ -25,6 +25,8 @@ struct cheats *cheats;
 
 double sample_rate;
 double frame_rate;
+char core_lib_name[64] = "";      /* retro_system_info.library_name */
+char core_lib_version[32] = "";   /* retro_system_info.library_version */
 double aspect_ratio;
 unsigned audio_buffer_size_override;
 int state_slot;
@@ -762,6 +764,10 @@ int core_open(const char *corefile, const char *tag_name) {
 	current_core.retro_get_system_info(&info);
 	if (info.valid_extensions)
 		extensions = string_split(info.valid_extensions, '|');
+	if (info.library_name)
+		strncpy(core_lib_name, info.library_name, sizeof(core_lib_name) - 1);
+	if (info.library_version)
+		strncpy(core_lib_version, info.library_version, sizeof(core_lib_version) - 1);
 
 	return 0;
 }
