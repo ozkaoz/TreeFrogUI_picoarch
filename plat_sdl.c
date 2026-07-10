@@ -1432,10 +1432,14 @@ int plat_reinit(void)
 		sf3000_sound_driver_deinit();
 	}
 	if (sf3000_sound_driver_init) {
-		sf3000_sound_driver_init(NULL, SAMPLE_RATE, 2);
+		/* Init the hw driver at the core's own rate (NOT a forced 48kHz):
+		 * forcing 48k desynced/sped up cores whose native rate isn't 48kHz
+		 * (mame2000 22050, GBA). Cores that the hw driver can't init at their
+		 * rate (e.g. Amiga 44.1k, which hung) are fixed in-core to emit 48kHz. */
+		sf3000_sound_driver_init(NULL, sample_rate, 2);
 	}
 	audio.in_sample_rate = sample_rate;
-	audio.out_sample_rate = SAMPLE_RATE;
+	audio.out_sample_rate = sample_rate;
 #else
 	audio.in_sample_rate = sample_rate;
 	plat_sound_resize_buffer();
@@ -1709,9 +1713,19 @@ static inline uint32_t cvt565(uint16_t c) {
            (((c & 0x001F) << 3) | ((c & 0x001C) >> 2));
 }
 
-static void sf3000_frame_limit(void) {
+/* Paces one EMULATED frame. Called once per retro_run from the main loop (NOT
+ * per present) — cores that frameskip (mame2000) render fewer frames than they
+ * emulate, so pacing on present let the skipped frames run unpaced → game ran
+ * too fast (e.g. 3x). Pace per emulated frame instead. */
+void sf3000_frame_limit(void) {
     extern int g_ff_level;            /* 0=off,1=2x,2=3x */
-    long long target = 16666 / (g_ff_level + 1);   /* pace emulation faster on FF */
+    extern double frame_rate;         /* core's native fps (retro_get_system_av_info) */
+    /* Pace to the CORE's frame rate, not a hardcoded 60 — cores whose native
+     * rate isn't 60 (ecwolf 35fps, some arcade games) otherwise run too fast
+     * (and their frame-time callback / audio desync from the mismatch). Falls
+     * back to 60fps if the core hasn't reported a rate yet. */
+    long long base = (frame_rate > 1.0) ? (long long)(1000000.0 / frame_rate) : 16666;
+    long long target = base / (g_ff_level + 1);   /* pace emulation faster on FF */
     static struct timeval last_tv = {0, 0};
     struct timeval tv;
     gettimeofday(&tv, NULL);
@@ -2059,7 +2073,6 @@ if (sf3000_use_hwdisp) {
                         }
                     }
                 }
-                sf3000_frame_limit();   /* paces emulation (target scales with FF level) */
                 if (ff_skip) return;    /* FF: drop this present to keep display 60fps */
                 /* R36SX: disp_frame hangs → direct fb0 write. SF3000: disp_frame. */
                 if (!(sf3000_is_r36sx() && hwdisp_present_direct(compose_buf, width, height, width * 2)))
@@ -2067,7 +2080,6 @@ if (sf3000_use_hwdisp) {
                 return;
             }
         }
-        sf3000_frame_limit();   /* paces emulation (target scales with FF level) */
         if (ff_skip) return;    /* FF: drop this present to keep display 60fps */
         /* SF3500: the picoarch pause menu renders to the SDL surface (320x240) →
          * disp_frame tiles that odd size. Nearest-scale ONLY the menu surface up

@@ -4,7 +4,9 @@ static const struct core_override_option mame2000_core_option_overrides[] = {
 	{
 		.key = "mame2000-frameskip",
 		.info = "Skip frames to avoid audio crackling. Improves performance at the expense of visual smoothness.",
-		.default_value = "auto",
+		/* disabled by default: 'auto' skipped 2/3 frames and (with per-present
+		 * pacing) ran games ~3x fast; render every frame instead. */
+		.default_value = "disabled",
 		.retro_var_value = "Frameskip ; disabled|auto|threshold"
 	},
 	{

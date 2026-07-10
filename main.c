@@ -1008,6 +1008,14 @@ int main(int argc, char **argv) {
 #endif
 		if (!should_quit)
 			plat_video_flip();
+#ifdef PLATFORM_SF3000
+		/* Pace once per EMULATED frame (not per present) — frameskipping cores
+		 * (mame2000) otherwise run their skipped frames unpaced -> too fast. */
+		if (!g_is_frogui) {
+			extern void sf3000_frame_limit(void);
+			sf3000_frame_limit();
+		}
+#endif
 		if (!g_is_frogui)
 			sram_autosave();   /* flush in-game saves without waiting for a clean exit */
 	} while (!should_quit);
