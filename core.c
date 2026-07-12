@@ -784,14 +784,17 @@ int core_load_content(struct content *content) {
 	int ret = -1;
 	char cheats_path[MAX_PATH] = {0};
 
+	DBG("DBG M5a: load_game_info (unzip if needed)\n");
 	if (core_load_game_info(content, &game_info)) {
 		goto finish;
 	}
 
+	DBG("DBG M5b: retro_load_game path=%s\n", game_info.path ? game_info.path : "(null)");
 	if (!current_core.retro_load_game(&game_info)) {
 		PA_ERROR("Couldn't load content\n");
 		goto finish;
 	}
+	DBG("DBG M5c: retro_load_game returned\n");
 
 	content_based_name(content, cheats_path, sizeof(cheats_path), config_dir, "cheats/", ".cht");
 	if (cheats_path[0] != '\0') {
@@ -799,6 +802,7 @@ int core_load_content(struct content *content) {
 		core_apply_cheats(cheats);
 	}
 
+	DBG("DBG M5d: sram_read\n");
 	sram_read();
 
 	if (!strcmp(core_name, "fmsx") && current_core.retro_set_controller_port_device) {
@@ -817,7 +821,11 @@ int core_load_content(struct content *content) {
 		current_core.retro_set_controller_port_device(0, RETRO_DEVICE_JOYPAD);
 	}
 
+	DBG("DBG M5e: get_system_av_info\n");
 	current_core.retro_get_system_av_info(&av_info);
+	DBG("DBG M5f: av %dx%d rate=%d fps*100=%d, plat_reinit\n",
+	    av_info.geometry.base_width, av_info.geometry.base_height,
+	    (int)av_info.timing.sample_rate, (int)(av_info.timing.fps * 100));
 
 	PA_INFO("Screen: %dx%d\n", av_info.geometry.base_width, av_info.geometry.base_height);
 	PA_INFO("Audio sample rate: %f\n", av_info.timing.sample_rate);

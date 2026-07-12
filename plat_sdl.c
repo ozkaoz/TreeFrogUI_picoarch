@@ -1026,6 +1026,7 @@ static unsigned           sf3000_aring_r = 0;   /* consumer: audio thread */
 static pthread_mutex_t    sf3000_aring_mtx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t          sf3000_audio_thread;
 static volatile int       sf3000_audio_running = 0;
+static int                sf3000_rs_acc = 0;    /* nearest-resample accumulator */
 
 static volatile int sf3000_audio_init_rc = 0;   /* 0=pending, 1=ok, -1=failed */
 
@@ -1144,6 +1145,7 @@ static int plat_sound_init(void)
 	/* Start the non-blocking audio consumer thread (it init's the DAC itself). */
 	sf3000_load_snd_gain();   /* re-read cubegm/sndgain.txt each game launch */
 	sf3000_aring_w = sf3000_aring_r = 0;
+	sf3000_rs_acc = 0;
 	sf3000_audio_init_rc = 0;
 	if (!sf3000_audio_running) {
 		sf3000_audio_running = 1;
@@ -1208,15 +1210,26 @@ void plat_sound_write(const struct audio_frame *data, int frames)
 {
 #ifdef PLATFORM_SF3000
 	/* Non-blocking enqueue: hand frames to the consumer thread and return
-	 * immediately. On overrun we drop the excess rather than block the emu. */
+	 * immediately. On overrun we drop the excess rather than block the emu.
+	 * The DAC is fixed at SAMPLE_RATE (48kHz); cores emitting any other rate
+	 * (Genesis 44.1kHz, SNES 32040Hz...) are nearest-resampled (drop/duplicate)
+	 * here, else they play pitch-shifted and starve the ring. 48kHz cores
+	 * (e.g. nestopia) pass through 1:1. */
 	if (sf3000_audio_running) {
+		int in_rate = audio.in_sample_rate > 0
+			? audio.in_sample_rate : audio.out_sample_rate;
 		pthread_mutex_lock(&sf3000_aring_mtx);
 		for (int i = 0; i < frames; i++) {
-			if (sf3000_aring_w - sf3000_aring_r >= SF3000_ARING_FRAMES)
-				break;  /* ring full — drop remaining frames */
-			sf3000_aring[sf3000_aring_w & SF3000_ARING_MASK] = data[i];
-			sf3000_aring_w++;
+			sf3000_rs_acc += audio.out_sample_rate;
+			while (sf3000_rs_acc >= in_rate) {
+				sf3000_rs_acc -= in_rate;
+				if (sf3000_aring_w - sf3000_aring_r >= SF3000_ARING_FRAMES)
+					goto ring_full;  /* drop remaining frames */
+				sf3000_aring[sf3000_aring_w & SF3000_ARING_MASK] = data[i];
+				sf3000_aring_w++;
+			}
 		}
+ring_full:
 		pthread_mutex_unlock(&sf3000_aring_mtx);
 	}
 #else
@@ -1428,18 +1441,17 @@ dbg_log("DBG M3: sound init done\n");
 int plat_reinit(void)
 {
 #ifdef PLATFORM_SF3000
-	if (sf3000_sound_driver_deinit) {
-		sf3000_sound_driver_deinit();
-	}
-	if (sf3000_sound_driver_init) {
-		/* Init the hw driver at the core's own rate (NOT a forced 48kHz):
-		 * forcing 48k desynced/sped up cores whose native rate isn't 48kHz
-		 * (mame2000 22050, GBA). Cores that the hw driver can't init at their
-		 * rate (e.g. Amiga 44.1k, which hung) are fixed in-core to emit 48kHz. */
-		sf3000_sound_driver_init(NULL, sample_rate, 2);
-	}
+	/* The DAC stays at the fixed 48kHz it was init'd with on the audio thread;
+	 * plat_sound_write nearest-resamples each core's native rate to it. Do NOT
+	 * deinit/re-init the driver here: this runs on the emu thread, and when the
+	 * audio thread is blocked inside sound_driver_playframe (UAE's load-time
+	 * warmup pre-fills the ring) a concurrent deinit crashes the driver. The
+	 * SF3500-class driver's thread-local handle forbids cross-thread init too.
+	 * A fixed 48kHz DAC also skips the driver's own (poor) resampler, which is
+	 * what made non-48kHz cores sound bad in the first place. */
 	audio.in_sample_rate = sample_rate;
-	audio.out_sample_rate = sample_rate;
+	DBG("DBG R: plat_reinit in_rate=%d out_rate=%d\n",
+	    audio.in_sample_rate, audio.out_sample_rate);
 #else
 	audio.in_sample_rate = sample_rate;
 	plat_sound_resize_buffer();
