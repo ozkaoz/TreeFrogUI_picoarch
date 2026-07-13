@@ -164,7 +164,7 @@ static void sigsegv_handler(int sig, siginfo_t *si, void *ucv) {
 static uint32_t vsyncs;
 static uint32_t renders;
 
-/* Fast-forward speed level, cycled by SELECT+Y: 0=off, 1=2x, 2=3x.
+/* Fast-forward speed level, cycled by SELECT+R1: 0=off, 1=2x, 2=3x.
  * The frame limiter paces emulation at (level+1)*60fps and the SF3000/R36SX
  * present skips to keep display at 60fps (see plat_sdl.c). Audio mutes while FF. */
 int g_ff_level = 0;
