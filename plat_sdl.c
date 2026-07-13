@@ -1979,6 +1979,65 @@ static void sf3000_screenshot(const void *src, int w, int h, int pitch) {
 }
 
 void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
+    /* The driver's disp_frame only accepts stock-sized game frames (<=640x480 —
+     * it prints "Frame is too large than screen size" and draws nothing for
+     * anything bigger, e.g. Game & Watch artwork at 653x392 or 606x748) plus
+     * exactly panel-size frames (FrogUI's path, proven on every boot). So any
+     * frame over 640x480 that isn't already panel-size gets nearest-scaled to
+     * aspect-fit and composed centered into a full panel-size canvas, black
+     * bars baked in. */
+    /* STICKY: once one frame composes, compose every later frame too. Cores
+     * that zoom (G&W Multi Screen alternates full view 606x748 <-> zoomed
+     * 343x193) otherwise flap the frame size, and each size change makes the
+     * driver re-init its geometry (hcge_driver_init churn) — which wedges it. */
+    static int compose_sticky = 0;
+    if ((compose_sticky || width > 640 || height > 480) &&
+        !(width == PANEL_W && height == PANEL_H)) {
+        {
+            extern void dbg_log(const char *fmt, ...);
+            static int c_last_w = -1, c_last_h = -1;
+            if (width != c_last_w || height != c_last_h) {
+                dbg_log("DBG compose: core frame %dx%d pitch=%d -> %dx%d canvas\n",
+                        width, height, pitch, PANEL_W, PANEL_H);
+                c_last_w = width; c_last_h = height;
+            }
+        }
+        compose_sticky = 1;
+        static uint16_t *fit_buf = NULL;
+        static int fit_cap = 0;
+        int dw = PANEL_W, dh = PANEL_H;
+        if ((int64_t)width * PANEL_H > (int64_t)height * PANEL_W)
+            dh = (int)((int64_t)height * PANEL_W / width);   /* wider: fit width */
+        else
+            dw = (int)((int64_t)width * PANEL_H / height);   /* taller: fit height */
+        if (dw < 1) dw = 1;
+        if (dh < 1) dh = 1;
+        if (PANEL_W * PANEL_H > fit_cap) {
+            free(fit_buf);
+            fit_cap = PANEL_W * PANEL_H;
+            fit_buf = (uint16_t *)malloc((size_t)fit_cap * sizeof(uint16_t));
+        }
+        if (fit_buf) {
+            const uint8_t *s8 = (const uint8_t *)src;
+            int ox = (PANEL_W - dw) / 2, oy = (PANEL_H - dh) / 2;
+            uint32_t xstep = ((uint32_t)width << 16) / dw;
+            uint32_t ystep = ((uint32_t)height << 16) / dh;
+            uint32_t yacc = 0;
+            memset(fit_buf, 0, (size_t)PANEL_W * PANEL_H * sizeof(uint16_t));
+            for (int y = 0; y < dh; y++, yacc += ystep) {
+                const uint16_t *srow =
+                    (const uint16_t *)(s8 + (size_t)(yacc >> 16) * pitch);
+                uint16_t *drow = fit_buf + (size_t)(oy + y) * PANEL_W + ox;
+                uint32_t xacc = 0;
+                for (int x = 0; x < dw; x++, xacc += xstep)
+                    drow[x] = srow[xacc >> 16];
+            }
+            src = fit_buf;
+            width = PANEL_W;
+            height = PANEL_H;
+            pitch = PANEL_W * 2;
+        }
+    }
     /* Screenshot hotkey: SELECT (bit0) + L1 (bit10). Capture whatever's on screen
      * (game/FrogUI/menu frame), rising-edge so one shot per press. L1 picked
      * because R2/R1/L2/START/B/Y are already taken by the OnionOS hotkeys. */
@@ -1993,6 +2052,16 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
     {
         extern void dbg_log(const char *fmt, ...);
         static int s_blit = 0;
+        static int s_last_w = -1, s_last_h = -1;
+        /* re-log on every frame-size change (zoom, mode switch), not just the
+         * first 8 frames — size transitions are where display bugs live */
+        if (width != s_last_w || height != s_last_h) {
+            if (s_last_w != -1)
+                dbg_log("DBG blit SIZE CHANGE: %dx%d -> %dx%d\n",
+                        s_last_w, s_last_h, width, height);
+            s_last_w = width; s_last_h = height;
+            s_blit = 0;
+        }
         if (s_blit < 8) {
             s_blit++;
             dbg_log("DBG blit#%d: src=%p screen=%p w=%d h=%d pitch=%d scale_filter=%d scale_size=%d use_hw=%d PANEL=%dx%d\n",
