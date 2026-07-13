@@ -1026,7 +1026,8 @@ static unsigned           sf3000_aring_r = 0;   /* consumer: audio thread */
 static pthread_mutex_t    sf3000_aring_mtx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t          sf3000_audio_thread;
 static volatile int       sf3000_audio_running = 0;
-static int                sf3000_rs_acc = 0;    /* nearest-resample accumulator */
+static uint32_t           sf3000_rs_phase = 0;  /* linear-resample phase, 16.16 */
+static struct audio_frame sf3000_rs_prev;       /* previous input frame */
 
 static volatile int sf3000_audio_init_rc = 0;   /* 0=pending, 1=ok, -1=failed */
 
@@ -1040,12 +1041,25 @@ static void *sf3000_audio_thread_fn(void *unused)
 	 * MUST run on the same thread — init on the emu thread left a NULL handle
 	 * here, so playframe deref'd it (+0x278 SIGSEGV). pcsx4all works precisely
 	 * because it inits + feeds on one thread. Doing it here fixes SF3500-class
-	 * and is harmless for SF3000 (same-thread init is strictly safer). */
-	if (sf3000_sound_driver_init && sf3000_sound_driver_init(NULL, SAMPLE_RATE, 2) < 0) {
-		PA_ERROR("SF3000: sound_driver_init failed on audio thread\n");
-		sf3000_audio_init_rc = -1;
-		sf3000_audio_running = 0;
-		return NULL;
+	 * and is harmless for SF3000 (same-thread init is strictly safer).
+	 * RETRY on failure: at menu→game transitions the previous process's
+	 * deinit settles asynchronously in the audio daemon; a first-try init can
+	 * fail and giving up left the whole system silent until reboot. */
+	if (sf3000_sound_driver_init) {
+		int rc = -1;
+		for (int try = 0; try < 20; try++) {
+			rc = sf3000_sound_driver_init(NULL, SAMPLE_RATE, 2);
+			if (rc >= 0)
+				break;
+			usleep(100 * 1000);   /* 100ms; up to 2s total */
+		}
+		if (rc < 0) {
+			PA_ERROR("SF3000: sound_driver_init failed on audio thread (all retries)\n");
+			dbg_log("DBG A: sound_driver_init FAILED after retries\n");
+			sf3000_audio_init_rc = -1;
+			sf3000_audio_running = 0;
+			return NULL;
+		}
 	}
 	sf3000_audio_init_rc = 1;
 
@@ -1145,7 +1159,8 @@ static int plat_sound_init(void)
 	/* Start the non-blocking audio consumer thread (it init's the DAC itself). */
 	sf3000_load_snd_gain();   /* re-read cubegm/sndgain.txt each game launch */
 	sf3000_aring_w = sf3000_aring_r = 0;
-	sf3000_rs_acc = 0;
+	sf3000_rs_phase = 0;
+	sf3000_rs_prev.left = sf3000_rs_prev.right = 0;
 	sf3000_audio_init_rc = 0;
 	if (!sf3000_audio_running) {
 		sf3000_audio_running = 1;
@@ -1212,22 +1227,37 @@ void plat_sound_write(const struct audio_frame *data, int frames)
 	/* Non-blocking enqueue: hand frames to the consumer thread and return
 	 * immediately. On overrun we drop the excess rather than block the emu.
 	 * The DAC is fixed at SAMPLE_RATE (48kHz); cores emitting any other rate
-	 * (Genesis 44.1kHz, SNES 32040Hz...) are nearest-resampled (drop/duplicate)
-	 * here, else they play pitch-shifted and starve the ring. 48kHz cores
-	 * (e.g. nestopia) pass through 1:1. */
+	 * (Genesis 44.1kHz, SNES 32040Hz...) are linear-resampled here, else they
+	 * play pitch-shifted and starve the ring. Nearest (dup/drop) crackled —
+	 * duplicating every other sample at SNES's 1.5x ratio is audible ZOH
+	 * distortion. 48kHz cores (e.g. nestopia) land on frac≈0 → passthrough. */
 	if (sf3000_audio_running) {
 		int in_rate = audio.in_sample_rate > 0
 			? audio.in_sample_rate : audio.out_sample_rate;
+		/* phase step per output sample, 16.16 fixed: in_rate/out_rate */
+		uint32_t step = (uint32_t)(((uint64_t)in_rate << 16) / audio.out_sample_rate);
 		pthread_mutex_lock(&sf3000_aring_mtx);
 		for (int i = 0; i < frames; i++) {
-			sf3000_rs_acc += audio.out_sample_rate;
-			while (sf3000_rs_acc >= in_rate) {
-				sf3000_rs_acc -= in_rate;
+			struct audio_frame cur = data[i];
+			/* emit outputs positioned between prev and cur */
+			while (sf3000_rs_phase < 0x10000) {
+				int frac = sf3000_rs_phase & 0xffff;
+				struct audio_frame out;
 				if (sf3000_aring_w - sf3000_aring_r >= SF3000_ARING_FRAMES)
 					goto ring_full;  /* drop remaining frames */
-				sf3000_aring[sf3000_aring_w & SF3000_ARING_MASK] = data[i];
+				/* delta*frac>>16 can exceed int16 (delta up to ±65535) — keep the
+				 * math in int32; the interpolated result itself always lies
+				 * between prev and cur, so only the final value fits int16. */
+				out.left  = (int16_t)(sf3000_rs_prev.left +
+					(int32_t)(((int64_t)(cur.left  - sf3000_rs_prev.left)  * frac) >> 16));
+				out.right = (int16_t)(sf3000_rs_prev.right +
+					(int32_t)(((int64_t)(cur.right - sf3000_rs_prev.right) * frac) >> 16));
+				sf3000_aring[sf3000_aring_w & SF3000_ARING_MASK] = out;
 				sf3000_aring_w++;
+				sf3000_rs_phase += step;
 			}
+			sf3000_rs_phase -= 0x10000;
+			sf3000_rs_prev = cur;
 		}
 ring_full:
 		pthread_mutex_unlock(&sf3000_aring_mtx);
