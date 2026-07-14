@@ -1760,8 +1760,9 @@ static inline uint32_t cvt565(uint16_t c) {
  * emulate, so pacing on present let the skipped frames run unpaced → game ran
  * too fast (e.g. 3x). Pace per emulated frame instead. */
 void sf3000_frame_limit(void) {
-    extern int g_ff_level;            /* 0=off,1=2x,2=3x */
+    extern int g_ff_level;            /* 0=off,1=2x,2=3x,3=uncapped */
     extern double frame_rate;         /* core's native fps (retro_get_system_av_info) */
+    if (g_ff_level == 3) return;      /* uncapped: no pacing, run flat out */
     /* Pace to the CORE's frame rate, not a hardcoded 60 — cores whose native
      * rate isn't 60 (ecwolf 35fps, some arcade games) otherwise run too fast
      * (and their frame-time callback / audio desync from the mismatch). Falls
@@ -2122,7 +2123,10 @@ if (sf3000_use_hwdisp) {
         int ff_skip = 0;
         if (g_ff_level && src != screen->pixels) {
             static unsigned ff_ctr = 0;
-            if ((++ff_ctr) % (g_ff_level + 1)) ff_skip = 1;
+            /* 2x/3x: present 1 of (level+1). Uncapped(3): no pacing, so present
+             * every 2nd emulated frame (frameskip 1) to cut present cost. */
+            int div = (g_ff_level == 3) ? 2 : (g_ff_level + 1);
+            if ((++ff_ctr) % div) ff_skip = 1;
         }
         int aspect = (src == screen->pixels) || (scale_size != SCALE_SIZE_FULL);
         hwdisp_set_target_aspect(aspect ? PANEL_ASPECT_NUM : 0, aspect ? PANEL_ASPECT_DEN : 0);

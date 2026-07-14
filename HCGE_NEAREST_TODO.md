@@ -199,3 +199,110 @@ rotate** (no magnification → no interpolation → sharp) + HW DMA present. Wir
 → `hwdisp_present_integer`, else `hwdisp_present` (driver bilinear fill). Only the
 cheap pixel replicate is SW; rotate+present are HW. This is the practical sharp
 result; pure zero-SW HW nearest is parked pending the coefficient-forging work.
+
+---
+
+## 2026-07 session: designfilterff GOT hook + coeff-gate patch — coeffs FORCED to box, STILL SOFT
+
+Picked up "coefficient forging" (Path A / Attempt 1's open thread). This time we
+did NOT patch a smooth flag — we hooked the userspace **coefficient generator**
+itself and fed it a box (nearest) prototype. It worked mechanically all the way
+through, and the image is **still soft on the HW-scaled aspect-fit path**. So a
+correct-looking box kernel pushed through designfilterff is NOT sufficient; the
+GE output stays interpolated. Parked again. Full trace so next time starts here.
+
+### The real runtime coefficient path (this driver, `driver_r36sx.so` md5 f19ff1ce…)
+
+Coefficients are regenerated **per blit, in userspace**, on the render thread —
+NOT a static table, NOT a one-time init:
+
+```
+video_driver_disp_frame @0x42e0
+  → fbdev_draw_frame @0x5cc8   (PRODUCER only: mutex_lock, memcpy frame params,
+                                cond_signal → wakes render thread; NO blit here)
+  → [render thread] fb_paint_task @0x52d8
+      → hcge_stretch_blit @0xab98   (call site @0x569c)
+          → gen_fliter_coef @0x90e0
+              → designfilterff  (EXPORTED, GOT slot -32328(gp)) @0x91b8
+              → extract_coef    (EXPORTED, GOT slot -32256(gp)) @0x91d0
+```
+
+`designfilterff` @0xf3c0, `extract_coef` @0x10b78, `extract_phase` @0x10b38 —
+all exported. hcge_stretch_blit also exists on SF3000/SF3500 drivers (same
+symbol), so this generalises.
+
+### Hook 1 — GOT swap of designfilterff (works, no RELRO)
+
+Driver has **no RELRO** (readelf: LOAD RW seg, no GNU_RELRO). GOT is writable.
+Resolve the GOT via `dlinfo(RTLD_DI_LINKMAP)` → walk `l_ld` for `DT_PLTGOT`,
+`DT_MIPS_LOCAL_GOTNO (0x7000000a)`, `DT_MIPS_SYMTABNO (0x70000011)`,
+`DT_MIPS_GOTSYM (0x70000013)`; global GOT entries = `LOCAL_GOTNO + (SYMTABNO -
+GOTSYM)`. Scan them for the address of `dlsym(handle,"designfilterff")`, overwrite
+with our fn (aligned word store = atomic). Confirmed: `hits=1`, our replacement
+installed.
+
+### Blocker A — coeff-gen is gated, hook never fired at first
+
+Installing the GOT hook alone did nothing (`box_filter` never logged). Reason:
+hcge_stretch_blit only calls gen_fliter_coef when a filter-mode flag says so:
+
+```
+af1c:  andi v1,v1,0xc          # 0x3063000c   state[+0x8c] & 0xC
+af20:  beq  v1,a0,0xb350        # 0x1064010b   a0 == 4 → take regen path (b350)
+```
+
+On R36SX that branch is **never taken** → the GE keeps its **power-on smooth
+coefficients** and designfilterff is never called. (This is the same "NONE =
+skip designfilter, keep default smooth coeffs" behaviour the 2026-06 session
+found from the other direction.)
+
+### Hook 2 — force the gate (pattern-scanned live patch)
+
+Rewrote the beq's rt field a0(4)→v1(3) → `beq v1,v1` = always-taken, so every
+scaling blit regenerates coeffs through our hook. Pattern-scanned the first LOAD
+seg (filesz 0x12b9c) for `0x3063000c` followed by `0x10640000`-masked, patched
+`t[i+1] = (orig & 0xffff) | 0x10630000`, mprotect RWX + `__builtin___clear_cache`.
+Confirmed on device: `stretch-blit coeff-gate patched x1`, then `box_filter
+call#…` fires every frame (`src=240 dst=640 ph=16 taps=4 a4=1 a5=65536 fb=8`).
+
+### The box kernel (verified correct shape, still soft)
+
+designfilterff sig (from the hook): `(srcdim, dstdim, nphase=16, ntaps=4, a4=1,
+a5=65536, fracbits=8, ws, int16 *proto)`. proto has `nphase*ntaps+1 = 65` taps.
+extract_coef indexes `coef[tap][phase] = proto[(ntaps-1-tap)*nphase + phase]`
+(from its disasm: `idx = ((ntaps-1-tap)*nphase + phase)`).
+
+Box we wrote: `proto[i]=255` (=(1<<fb)-1, safe under signed/unsigned 9-bit) for
+the middle `nphase` entries `[32-8, 32+8)`, else 0. That yields:
+phase 0..7 → tap1 = 255, phase 8..15 → tap2 = 255, all other taps 0 — i.e. a
+**single full-weight tap per phase = textbook nearest polyphase.** The math is
+right.
+
+### Result: HW output STILL soft
+
+On device: **aspect (HW box-scaled) = soft; SW nearest (panel_build) = sharp.**
+A correct box kernel forced through the real coeff generator does not produce a
+sharp image. Leading hypotheses (untested):
+- The GE has a **second interpolation/normalisation stage** after coeff load
+  (the polyphase taps aren't the last word on sharpness).
+- 9-bit coeff **packing/quantisation** (`hcge_ge_coeff` float→fixed, the
+  `andi …,0x1ff` packing at 0x9214+) collapses/normalises our box.
+- `extract_phase` (the other half, GOT -32328 sibling) also feeds the HW and
+  needs a matching box, which we did NOT override.
+- Sharpness on this GE may be a **separate register** (fbdev_set_enhance
+  @0x6ff0 = sharpness/contrast ioctls 0x40180d02 / 0x80180d01), not the scaler
+  coeffs at all.
+
+### Verdict
+
+HW nearest still NOT achieved. Only SW nearest (`panel_build` replicate/stretch
+→ 1:1 present) is sharp, and it costs CPU — rejected (must be zero perf impact).
+No zero-cost sharp path exists on this scaler yet. **Next lever to try:**
+override `extract_phase` too, and/or probe `fbdev_set_enhance` sharpness ioctls;
+if neither bites, the polyphase coeffs genuinely aren't the sharpness knob and
+this is a dead end short of a different present path.
+
+Session code (GOT hook `hwnear_apply`, box `hwnear_box_filter`, gate patch,
+`hwdisp_present_sharp`, panel_build ping-pong, live menu Filter toggle,
+`ff_uncapped`) was **reverted** after this — `main` stays clean bilinear. Recover
+from git history (working tree of the 2026-07 filter session) if resuming.

@@ -164,9 +164,11 @@ static void sigsegv_handler(int sig, siginfo_t *si, void *ucv) {
 static uint32_t vsyncs;
 static uint32_t renders;
 
-/* Fast-forward speed level, cycled by SELECT+R1: 0=off, 1=2x, 2=3x.
- * The frame limiter paces emulation at (level+1)*60fps and the SF3000/R36SX
- * present skips to keep display at 60fps (see plat_sdl.c). Audio mutes while FF. */
+/* Fast-forward speed level, cycled by SELECT+R1: 0=off, 1=2x, 2=3x, 3=uncapped.
+ * 2x/3x: the frame limiter paces emulation at (level+1)*60fps and the
+ * SF3000/R36SX present skips to keep display at 60fps. Uncapped: no pacing at
+ * all (max the CPU can do), present every 2nd frame (frameskip). See
+ * plat_sdl.c. Audio mutes while FF. */
 int g_ff_level = 0;
 
 static void toggle_fast_forward(int force_off)
@@ -179,7 +181,7 @@ static void toggle_fast_forward(int force_off)
 	}
 	if (!ff_enabled) return;   /* per-core: fast-forward off */
 	if (g_ff_level == 0) enable_audio_was = enable_audio;  /* snapshot on entry */
-	g_ff_level = (g_ff_level + 1) % 3;                     /* off → 2x → 3x → off */
+	g_ff_level = (g_ff_level + 1) % 4;               /* off → 2x → 3x → uncapped → off */
 	enable_audio = g_ff_level ? 0 : enable_audio_was;      /* mute while FF */
 }
 
