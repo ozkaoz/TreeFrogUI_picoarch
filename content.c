@@ -202,7 +202,7 @@ finish:
 }
 
 static int content_patch_file(struct content *content, const char *path) {
-	int fd, outfd;
+	int fd;
 	int ret = -1;
 	struct stat stat;
 	void *addr;
@@ -245,10 +245,11 @@ static int content_patch_file(struct content *content, const char *path) {
 	}
 
 	content_name = basename(content_path);
-	snprintf(content->tmpfile, MAX_PATH, "/tmp/pa-XXXXXX%s", content_name);
+	/* Deterministic temp name (see unzip_tmp): a randomized name broke in-place
+	 * saves for cores that derive their .srm from the ROM path. */
+	snprintf(content->tmpfile, MAX_PATH, "/tmp/pa-%s", content_name);
 
-	outfd = mkstemps(content->tmpfile, strlen(content_name));
-	outfile = fdopen(outfd, "w");
+	outfile = fopen(content->tmpfile, "w");
 	if (!outfile) {
 		PA_ERROR("Error creating temporary file for patching: %s\n", strerror(errno));
 		goto finish;

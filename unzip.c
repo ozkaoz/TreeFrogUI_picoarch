@@ -161,11 +161,13 @@ int unzip_tmp(FILE *zip, const char **extensions, char *filename, size_t len) {
 	FILE *dest = NULL;
 
 	if (!find_entry(zip, extensions, &info)) {
-		int fd = 0;
-		snprintf(filename, len, "/tmp/pa-XXXXXX%s", basename(info.filename));
-
-		fd = mkstemps(filename, strlen(info.filename));
-		dest = fdopen(fd, "w");
+		/* Deterministic temp name (was mkstemps → random each launch). Cores
+		 * that save in-place derive their .srm from the ROM path we hand them;
+		 * a randomized name meant a zipped ROM got a different save file every
+		 * run, so in-game saves couldn't be reloaded (gpsp_multicore). A stable
+		 * name keyed on the inner ROM name keeps the save path constant. */
+		snprintf(filename, len, "/tmp/pa-%s", basename(info.filename));
+		dest = fopen(filename, "w");
 
 		if (!dest) {
 			PA_ERROR("Error creating temporary file for decompression\n");

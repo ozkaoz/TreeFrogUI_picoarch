@@ -41,10 +41,16 @@ static int     g_active = 0;
 typedef int  (*fn_init_t)(void);
 typedef void (*fn_deinit_t)(void);
 typedef int  (*fn_disp_t)(void *src, int w, int h, int pitch);
+typedef void (*fn_aspect_t)(int fullscreen);
 
 static fn_init_t   p_init   = NULL;
 static fn_deinit_t p_deinit = NULL;
 static fn_disp_t   p_disp   = NULL;
+/* Driver's fullscreen toggle (exported fbdev_video_aspect_ratio): arg 1 =
+ * fullscreen fill (the GE stretches src→panel ignoring aspect), arg 0 =
+ * aspect-fit (letterbox). This is how stock does distort-to-fill in pure HW. */
+static fn_aspect_t p_aspect = NULL;
+static int         g_fs_state = -1;   /* last value pushed, avoid redundant calls */
 
 /* Aspect-pad staging buffer (lazy alloc, resized on demand) */
 static uint16_t *g_pad_buf  = NULL;
@@ -164,6 +170,8 @@ int hwdisp_init(void) {
     p_init   = (fn_init_t)  dlsym(g_handle, "video_drivers_init");
     p_deinit = (fn_deinit_t)dlsym(g_handle, "video_driver_deinit");
     p_disp   = (fn_disp_t)  dlsym(g_handle, "video_driver_disp_frame");
+    p_aspect = (fn_aspect_t)dlsym(g_handle, "fbdev_video_aspect_ratio");
+    g_fs_state = -1;
 
     if (!p_init || !p_deinit || !p_disp) {
         fprintf(stderr, "hwdisp: dlsym failed (init=%p deinit=%p disp=%p)\n",
@@ -401,26 +409,42 @@ static void upscale_nearest(const void *src, int w, int h, int pitch_bytes) {
 #define PANEL_PW 640
 #define PANEL_PH 480
 static int g_panel_scale = 2;       /* default full */
-static uint16_t *g_panelbuf = NULL; /* 640x480 cached staging */
 void hwdisp_set_panel_scale(int m) { g_panel_scale = m; }
 
+/* Ping-pong output buffers: disp_frame DMA-reads the previous frame async, so we
+ * write the other buffer — the result is safe to hand straight to disp_frame,
+ * no extra staging copy (present_direct skips its copy for panel_build output).
+ * Only the source rows that differ are scaled; duplicated rows are memcpy'd, and
+ * the full-buffer memset happens only when the output geometry changes. */
 static uint16_t *panel_build(const void *src, int w, int h, int pitch_bytes, int integer) {
-    if (!g_panelbuf) { g_panelbuf = (uint16_t*)malloc(PANEL_PW*PANEL_PH*2); if (!g_panelbuf) return NULL; }
+    static uint16_t *pb[2]; static unsigned pbgeo[2]; static int pbi;
+    pbi ^= 1;
+    if (!pb[pbi]) { pb[pbi] = (uint16_t*)malloc(PANEL_PW*PANEL_PH*2); if (!pb[pbi]) return NULL; pbgeo[pbi] = 0; }
+    uint16_t *d = pb[pbi];
     const int sp = pitch_bytes/2; const uint16_t *s = (const uint16_t*)src;
     if (integer) {
         int n = PANEL_PW/w; int ny = PANEL_PH/h; if (ny<n) n=ny; if (n<1) n=1;
         int dw=w*n, dh=h*n, ox=(PANEL_PW-dw)/2, oy=(PANEL_PH-dh)/2;
-        memset(g_panelbuf, 0, PANEL_PW*PANEL_PH*2);
+        unsigned geo = ((unsigned)dw<<16)|(unsigned)dh;
+        if (pbgeo[pbi] != geo) { memset(d, 0, PANEL_PW*PANEL_PH*2); pbgeo[pbi] = geo; }
         for (int y=0; y<h; y++){ const uint16_t *sr=s+(size_t)y*sp;
-            for (int ry=0; ry<n; ry++){ uint16_t *dr=g_panelbuf+(size_t)(oy+y*n+ry)*PANEL_PW+ox;
-                for (int x=0;x<w;x++){ uint16_t px=sr[x]; for(int rx=0;rx<n;rx++) dr[x*n+rx]=px; } } }
+            uint16_t *dr=d+(size_t)(oy+y*n)*PANEL_PW+ox;
+            for (int x=0;x<w;x++){ uint16_t px=sr[x]; for(int rx=0;rx<n;rx++) dr[x*n+rx]=px; }
+            for (int ry=1; ry<n; ry++) memcpy(dr+(size_t)ry*PANEL_PW, dr, (size_t)dw*2); }
     } else { /* full stretch */
         static int xm[PANEL_PW]; static int lw=-1;
         if (w!=lw){ for(int x=0;x<PANEL_PW;x++) xm[x]=x*w/PANEL_PW; lw=w; }
-        for (int y=0;y<PANEL_PH;y++){ const uint16_t *sr=s+(size_t)(y*h/PANEL_PH)*sp;
-            uint16_t *dr=g_panelbuf+(size_t)y*PANEL_PW; for(int x=0;x<PANEL_PW;x++) dr[x]=sr[xm[x]]; }
+        int lsy = -1;
+        for (int y=0;y<PANEL_PH;y++){
+            int sy = y*h/PANEL_PH;
+            uint16_t *dr=d+(size_t)y*PANEL_PW;
+            if (sy == lsy) { memcpy(dr, dr-PANEL_PW, PANEL_PW*2); continue; }
+            lsy = sy;
+            const uint16_t *sr=s+(size_t)sy*sp;
+            for(int x=0;x<PANEL_PW;x++) dr[x]=sr[xm[x]];
+        }
     }
-    return g_panelbuf;
+    return d;
 }
 
 int hwdisp_present_direct(const void *src, int w, int h, int pitch_bytes) {
@@ -428,22 +452,32 @@ int hwdisp_present_direct(const void *src, int w, int h, int pitch_bytes) {
     int lg = (s_n < 8);
     s_n++;
     if (!g_active || !src || !p_disp) return 0;
-    /* HW present: disp_frame HW-scales src→panel (no CPU upscale). For full/integer
-     * on game-size frames, pre-build a 640x480 panel buffer; aspect & panel-size
-     * (FrogUI) pass straight. */
+    /* disp_frame HW-scales src→panel; the driver's fullscreen flag
+     * (fbdev_video_aspect_ratio, like stock) picks fill vs aspect-fit. So:
+     *   full   → flag=fill, pass src straight → GE distort-fills in HW (fast).
+     *   aspect → flag=fit,  pass src straight → GE letterboxes in HW.
+     *   integer→ SW integer-replicate centered in 640x480 (exact NxN, sharp) —
+     *            the GE can't do nearest. panel-size (FrogUI) passes straight.
+     * Only integer still pays SW cost. */
+    if (p_aspect) {
+        /* Driver arg is inverted on this build: 0 = fill, 1 = aspect-fit. */
+        int want = (g_panel_scale == 2) ? 0 : 1;   /* full = fill, else fit */
+        if (want != g_fs_state) { p_aspect(want); g_fs_state = want; }
+    }
     const void *psrc = src; int pw = w, ph = h, ppitch = pitch_bytes;
-    if (!(w == PANEL_PW && h == PANEL_PH) && g_panel_scale != 1 /*aspect=straight*/) {
-        uint16_t *b = panel_build(src, w, h, pitch_bytes, g_panel_scale == 0);
-        if (b) { psrc = b; pw = PANEL_PW; ph = PANEL_PH; ppitch = PANEL_PW*2; }
+    int staged = 0;
+    if (!(w == PANEL_PW && h == PANEL_PH) && g_panel_scale == 0 /*integer only*/) {
+        uint16_t *b = panel_build(src, w, h, pitch_bytes, 1);
+        if (b) { psrc = b; pw = PANEL_PW; ph = PANEL_PH; ppitch = PANEL_PW*2; staged = 1; }
     }
     /* disp_frame DMA-reads src asynchronously; handing it the caller's live
      * buffer races the next frame's rendering (font/pixel shimmer during menu
      * scrolling on R36SX). Stage into ping-pong buffers so the engine always
-     * scans a stable copy. */
+     * scans a stable copy. panel_build output is already ping-ponged — skip. */
     static uint16_t *g_dpp[2];
     static int g_dppi;
     if (!g_dpp[0]) { g_dpp[0] = (uint16_t*)malloc(PANEL_PW*PANEL_PH*2); g_dpp[1] = (uint16_t*)malloc(PANEL_PW*PANEL_PH*2); }
-    if (g_dpp[0] && g_dpp[1] && pw <= PANEL_PW && ph <= PANEL_PH) {
+    if (!staged && g_dpp[0] && g_dpp[1] && pw <= PANEL_PW && ph <= PANEL_PH) {
         uint16_t *dst = g_dpp[g_dppi]; g_dppi ^= 1;
         for (int y = 0; y < ph; y++)
             memcpy(dst + (size_t)y*pw, (const uint8_t*)psrc + (size_t)y*ppitch, (size_t)pw*2);
@@ -481,10 +515,27 @@ void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {
         /* Fallthrough to HW path if alloc failed */
     }
 
+    /* Unpadded presents must NOT hand the core's live framebuffer to
+     * disp_frame — its HCGE DMA reads the source asynchronously while the core
+     * renders the next frame into it (bus contention + engine re-sync = the
+     * "Full-screen lags" report; Aspect was accidentally immune because its
+     * pad step copies to staging). Ping-pong stage, like present_direct. */
+    static uint16_t *fs[2];
+    static int fsi;
+    const void *psrc = src;
+    int ppitch = pitch_bytes;
+    if (!fs[0]) { fs[0] = (uint16_t*)malloc(640*480*2); fs[1] = (uint16_t*)malloc(640*480*2); }
+    if (fs[0] && fs[1] && w <= 640 && h <= 480) {
+        uint16_t *dst = fs[fsi]; fsi ^= 1;
+        for (int y = 0; y < h; y++)
+            memcpy(dst + (size_t)y*w, (const uint8_t*)src + (size_t)y*pitch_bytes, (size_t)w*2);
+        psrc = dst; ppitch = w*2;
+    }
+
     /* HW (bilinear) path: pass through, optional aspect pad. */
     if (g_aspect_num <= 0 || g_aspect_den <= 0) {
-        if (lg) DBG("DBG present#%d: passthru pre p_disp(%p,%d,%d,%d)\n", s_n, src, w, h, pitch_bytes);
-        rv = p_disp((void *)src, w, h, pitch_bytes);
+        if (lg) DBG("DBG present#%d: passthru pre p_disp(%p,%d,%d,%d)\n", s_n, psrc, w, h, ppitch);
+        rv = p_disp((void *)psrc, w, h, ppitch);
         if (lg) DBG("DBG present#%d: passthru post p_disp rv=%d\n", s_n, rv);
         return;
     }
@@ -492,14 +543,14 @@ void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {
     int pad_w = h * g_aspect_num / g_aspect_den;
     if (pad_w <= w) {
         if (lg) DBG("DBG present#%d: nopad pre p_disp\n", s_n);
-        rv = p_disp((void *)src, w, h, pitch_bytes);
+        rv = p_disp((void *)psrc, w, h, ppitch);
         if (lg) DBG("DBG present#%d: nopad post p_disp rv=%d\n", s_n, rv);
         return;
     }
 
-    pad_horizontal(src, w, h, pitch_bytes, pad_w);
+    pad_horizontal(psrc, w, h, ppitch, pad_w);
     if (!g_pad_buf) {
-        rv = p_disp((void *)src, w, h, pitch_bytes);
+        rv = p_disp((void *)psrc, w, h, ppitch);
         if (lg) DBG("DBG present#%d: padfail post rv=%d\n", s_n, rv);
         return;
     }
