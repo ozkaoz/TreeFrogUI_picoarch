@@ -429,7 +429,15 @@ static uint16_t *panel_build(const void *src, int w, int h, int pitch_bytes, int
         if (pbgeo[pbi] != geo) { memset(d, 0, PANEL_PW*PANEL_PH*2); pbgeo[pbi] = geo; }
         for (int y=0; y<h; y++){ const uint16_t *sr=s+(size_t)y*sp;
             uint16_t *dr=d+(size_t)(oy+y*n)*PANEL_PW+ox;
-            for (int x=0;x<w;x++){ uint16_t px=sr[x]; for(int rx=0;rx<n;rx++) dr[x*n+rx]=px; }
+            if (n == 2) {
+                /* Fast 2x: one 32-bit store per src pixel (two dup pixels at
+                 * once) instead of two 16-bit stores. dr is 32-bit aligned
+                 * (PANEL_PW, y*n, and ox=(PANEL_PW-w*2)/2 are all even). */
+                uint32_t *d32 = (uint32_t *)dr;
+                for (int x=0;x<w;x++){ uint32_t px=sr[x]; d32[x]=(px<<16)|px; }
+            } else {
+                for (int x=0;x<w;x++){ uint16_t px=sr[x]; uint16_t *dp=dr+x*n; for(int rx=0;rx<n;rx++) dp[rx]=px; }
+            }
             for (int ry=1; ry<n; ry++) memcpy(dr+(size_t)ry*PANEL_PW, dr, (size_t)dw*2); }
     } else { /* full stretch */
         static int xm[PANEL_PW]; static int lw=-1;
