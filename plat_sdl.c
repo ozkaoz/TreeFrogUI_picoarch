@@ -2115,6 +2115,9 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
 
 if (sf3000_use_hwdisp) {
         sf3000_hw_heartbeat();  /* mark HW as alive once it has drawn a few frames */
+        /* HW edge-sharpen: bilinear only (nearest is already sharp; enhance
+         * would over-crunch it). Applied on change. */
+        hwdisp_set_sharpen(scale_filter == SCALE_FILTER_NEAREST ? 0 : sf3000_sharpness);
         /* Fast-forward: frame_limit paces emulation at (level+1)*60fps; here we
          * present only 1 of (level+1) frames so the display stays 60fps and the
          * game runs (level+1)x. frame_limit runs first (below) → paces every
@@ -2130,7 +2133,10 @@ if (sf3000_use_hwdisp) {
         }
         int aspect = (src == screen->pixels) || (scale_size != SCALE_SIZE_FULL);
         hwdisp_set_target_aspect(aspect ? PANEL_ASPECT_NUM : 0, aspect ? PANEL_ASPECT_DEN : 0);
-        hwdisp_set_filter(0);   /* always HW bilinear (SW nearest path removed) */
+        /* Game frames honour the Filter setting (Nearest/Bilinear/Sharp);
+         * menu/FrogUI (panel-size) frames always bilinear (HW). */
+        hwdisp_set_filter(src != screen->pixels ? scale_filter
+                                                : SCALE_FILTER_BILINEAR);
 
         /* FPS / overlay text: render into a copy of src (RGB565), since src
          * itself is owned by the core and may be read-only. */

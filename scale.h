@@ -17,6 +17,7 @@ enum scale_size {
 enum scale_filter {
 	SCALE_FILTER_NEAREST,
 	SCALE_FILTER_BILINEAR,
+	SCALE_FILTER_SHARP,     /* integer prescale + HW residual (sharp-bilinear) */
 };
 
 enum scale_effect {

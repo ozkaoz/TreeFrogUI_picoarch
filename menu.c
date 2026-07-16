@@ -43,6 +43,7 @@ typedef enum
 	MA_VID_BLANK,
 	MA_VID_SCALE_SIZE,
 	MA_VID_FILTER,
+	MA_VID_SHARPNESS,
 } menu_id;
 
 me_bind_action me_ctrl_actions[] =
@@ -155,7 +156,9 @@ static int mh_rmcfg(int id, int keys)
 
 static void draw_src_bg(void) {
 	memcpy(g_menubg_ptr, g_menubg_src_ptr, g_menubg_src_h * g_menubg_src_pp * sizeof(uint16_t));
-	menu_darken_bg(g_menubg_ptr, g_menubg_src_ptr, g_menubg_src_h * g_menubg_src_pp, 0);
+	/* darker=1 (x0.375) instead of x0.5: dim the menu background a bit more so
+	 * text stays readable on bright scenes. Same for every menu (all copy this). */
+	menu_darken_bg(g_menubg_ptr, g_menubg_src_ptr, g_menubg_src_h * g_menubg_src_pp, 1);
 }
 
 static int mh_set_core(int id, int keys) {
@@ -533,7 +536,10 @@ static const char h_optimize_text[]        =
 	"text. May affect non-text content.";
 
 static const char *men_scale_size[] = { "Integer", "Aspect", "Full", NULL};
-static const char *men_scale_filter[] = { "Nearest", "Bilinear", NULL};
+static const char *men_scale_filter[] = { "Nearest", "Bilinear", "Sharp", NULL};
+static const char h_scale_filter[] =
+	"Nearest/Sharp are software-scaled and can lower FPS.\n"
+	"Bilinear is hardware (fast, soft). Sharp ~ nearest, faster.";
 
 /* Custom name+cycle for screen size — hides "Integer" when filter=BILINEAR
  * (HW path: SW-upscale to 854×480 panel buffer is too memory-heavy and lags
@@ -567,6 +573,9 @@ static const char h_sf3000_volume[] =
 	"Lowers this app's audio output so the system's low\n"
 	"volume steps are actually quiet (the stock volume\n"
 	"curve is loud). 100 = full. Saved to sndgain.txt.";
+static const char h_sf3000_sharpness[] =
+	"Hardware edge-sharpen for scaled video (0=off, 10=max).\n"
+	"Crisps up the display's bilinear scaling. Per-game.";
 #endif
 
 static menu_entry e_menu_video_options[] =
@@ -576,13 +585,14 @@ static menu_entry e_menu_video_options[] =
 	mee_onoff_h      ("Fast forward (SELECT+R1)",  0, ff_enabled, 1, h_ff_enabled),
 	mee_onoff_h      ("Rewind (hold SELECT+B)",   0, rewind_enabled, 1, h_rewind_enabled),
 	mee_cust_s_h     ("Screen size", MA_VID_SCALE_SIZE, 1, mh_scale_size, mgn_scale_size, h_scale_size),
-	mee_enum_h       ("Filter",        MA_VID_FILTER, scale_filter, men_scale_filter, NULL),
+	mee_enum_h       ("Filter",        MA_VID_FILTER, scale_filter, men_scale_filter, h_scale_filter),
 	// mee_range_h      ("Max upscale",              0, max_upscale, 1, 8, h_max_upscale),
 	mee_enum_h       ("Screen effect",    MA_VID_FX, scale_effect, men_scale_effect, h_scale_effect),
 	mee_handler_id_h (             "", MA_VID_BLANK, NULL, NULL),
 	mee_onoff_h      ("Optimize text",            0, optimize_text, 1, h_optimize_text),
 	mee_range_h      ("Audio buffer",             0, audio_buffer_size, 1, 15, h_audio_buffer_size),
 #ifdef PLATFORM_SF3000
+	mee_range_h      ("Sharpness",     MA_VID_SHARPNESS, sf3000_sharpness, 0, 10, h_sf3000_sharpness),
 	mee_range_h      ("Volume %",                 0, sf3000_snd_gain_pct, 0, 100, h_sf3000_volume),
 #endif
 	mee_end,
@@ -592,7 +602,11 @@ static menu_entry e_menu_video_options[] =
 static void menu_loop_video_prep(void) {
 	/* Integer (NONE) works on the HW present regardless of filter — no reset. */
 	/* Filter is owned by FrogUI settings — hide from in-game menu. */
-	me_enable(e_menu_video_options, MA_VID_FILTER, false);
+	me_enable(e_menu_video_options, MA_VID_FILTER, true);
+	/* Sharpness is a HW post-process for the hardware scale (Bilinear + Sharp);
+	 * true Nearest is already sharp (and SW), so hide it there. */
+	me_enable(e_menu_video_options, MA_VID_SHARPNESS,
+	          scale_filter != SCALE_FILTER_NEAREST);
 	/* Screen size always visible; effects only meaningful in nearest. */
 	me_enable(e_menu_video_options, MA_VID_SCALE_SIZE, true);
 	me_enable(e_menu_video_options, MA_VID_FX,
@@ -734,7 +748,7 @@ static void draw_savestate_bg(int slot)
 		goto finish;
 
 	if (bpp == sizeof(uint16_t)) {
-		menu_darken_bg(g_menubg_ptr, buf, w * h, 0);
+		menu_darken_bg(g_menubg_ptr, buf, w * h, 1);
 		drew_alt_bg = 1;
 	}
 
@@ -813,13 +827,14 @@ static void minui_draw_main(menu_entry *menu, int sel) {
 	menu_draw_begin(1, 0);                  /* darkened game frame as background */
 	menu_font_set_px((float)MENU_TTF_PX);
 
-	char title[128];
-	minui_game_title(title, sizeof(title));
-	menu_font_draw_text((uint16_t *)g_menuscreen_ptr, W, H, pad, pad + tdy, title, WHITE);
-
 	/* thumbnail box (right) = bright captured frame */
 	int tw = (W * 42) / 100, th = (tw * 3) / 4;
 	int tx = W - tw - pad, ty = pad + rh + rh / 2;
+
+
+	char title[128];
+	minui_game_title(title, sizeof(title));
+	menu_font_draw_text((uint16_t *)g_menuscreen_ptr, W, H, pad, pad + tdy, title, WHITE);
 	minui_thumb((const uint16_t *)g_menubg_src_ptr, g_menubg_src_w, g_menubg_src_h,
 	            g_menubg_src_pp, tx, ty, tw, th);
 	minui_border(tx - 3, ty - 3, tw + 6, th + 6, 3, WHITE);

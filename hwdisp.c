@@ -18,6 +18,7 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/time.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 #include <linux/fb.h>
@@ -42,6 +43,7 @@ typedef int  (*fn_init_t)(void);
 typedef void (*fn_deinit_t)(void);
 typedef int  (*fn_disp_t)(void *src, int w, int h, int pitch);
 typedef void (*fn_aspect_t)(int fullscreen);
+typedef void (*fn_enhance_t)(int p0, int p1, int p2, int p3, int p4);
 
 static fn_init_t   p_init   = NULL;
 static fn_deinit_t p_deinit = NULL;
@@ -51,6 +53,25 @@ static fn_disp_t   p_disp   = NULL;
  * aspect-fit (letterbox). This is how stock does distort-to-fill in pure HW. */
 static fn_aspect_t p_aspect = NULL;
 static int         g_fs_state = -1;   /* last value pushed, avoid redundant calls */
+
+/* Display-controller enhance/sharpness probe (exported fbdev_set_enhance):
+ * 5 params, first four 0-100, fifth 0-10 (a mode-like selector). Sweep them
+ * on-device by editing /mnt/sdcard/enhance.txt (5 ints) — read at init, so a
+ * game relaunch applies new values with no rebuild. Testing whether any combo
+ * sharpens the GE's bilinear scale toward nearest. */
+static fn_enhance_t p_enhance = NULL;
+static int          g_sharpen = -1;   /* last sharpness pushed (0-10); -1 = unset */
+
+/* Edge-sharpen level 0-10 (p4 of fbdev_set_enhance; colours left neutral at 50).
+ * Whole-panel DIS post-process — the closest the HW gets to "nearest" (edge
+ * peaking, not true point sampling). Applied on change only (it's an ioctl). */
+void hwdisp_set_sharpen(int level) {
+    if (level < 0) level = 0;
+    if (level > 10) level = 10;
+    if (!p_enhance || level == g_sharpen) return;
+    p_enhance(50, 50, 50, 50, level);
+    g_sharpen = level;
+}
 
 /* Aspect-pad staging buffer (lazy alloc, resized on demand) */
 static uint16_t *g_pad_buf  = NULL;
@@ -63,7 +84,8 @@ static uint16_t *g_near_buf = NULL;
 
 static int g_aspect_num = 0;
 static int g_aspect_den = 0;
-static int g_filter_nearest = 0;
+static int g_filter_nearest = 0;   /* SW-scale path (true nearest OR sharp) */
+static int g_filter_sharp   = 0;   /* sharp variant: integer prescale + HW residual */
 
 /* Direct-fb present: after video_drivers_init the driver reconfigures fb0 to its
  * native landscape geometry (R36SX: 1280x720 RGB565) and programs the display
@@ -171,6 +193,7 @@ int hwdisp_init(void) {
     p_deinit = (fn_deinit_t)dlsym(g_handle, "video_driver_deinit");
     p_disp   = (fn_disp_t)  dlsym(g_handle, "video_driver_disp_frame");
     p_aspect = (fn_aspect_t)dlsym(g_handle, "fbdev_video_aspect_ratio");
+    p_enhance = (fn_enhance_t)dlsym(g_handle, "fbdev_set_enhance");
     g_fs_state = -1;
 
     if (!p_init || !p_deinit || !p_disp) {
@@ -201,6 +224,7 @@ int hwdisp_init(void) {
         DBG("DBG hwdisp: setmode=%p calling setmode(0,0)\n", (void*)p_setmode);
         if (p_setmode) { int sr = p_setmode(0, 0); DBG("DBG hwdisp: setmode(0,0) ret=%d\n", sr); }
     }
+    g_sharpen = -1;   /* force re-apply on the next hwdisp_set_sharpen() */
     sf3000_dump_fb_state("hwdisp_init/post");
     /* fb0 for direct presents is mmap'd lazily by hwdisp_present_direct(). */
     return 0;
@@ -213,9 +237,13 @@ void hwdisp_set_target_aspect(int num, int den) {
     g_aspect_den = den;
 }
 
-void hwdisp_set_filter(int nearest) {
-    g_filter_nearest = nearest ? 1 : 0;
-    /* If switching to nearest, ensure native buffer exists. */
+/* filter: scale_filter enum — 0 nearest, 1 bilinear, 2 sharp (integer prescale
+ * + HW residual). Nearest and Sharp both use the SW path; Sharp additionally
+ * sets g_filter_sharp so present_direct prescales instead of full-stretching. */
+void hwdisp_set_filter(int filter) {
+    g_filter_nearest = (filter != 1);   /* nearest(0) or sharp(2) */
+    g_filter_sharp   = (filter == 2);
+    /* If switching to a SW-scale filter, ensure native buffer exists. */
     if (g_filter_nearest && !g_near_buf) {
         g_near_buf = (uint16_t*)malloc(HW_BUFSZ);
         if (g_near_buf) memset(g_near_buf, 0, HW_BUFSZ);
@@ -416,13 +444,15 @@ void hwdisp_set_panel_scale(int m) { g_panel_scale = m; }
  * no extra staging copy (present_direct skips its copy for panel_build output).
  * Only the source rows that differ are scaled; duplicated rows are memcpy'd, and
  * the full-buffer memset happens only when the output geometry changes. */
-static uint16_t *panel_build(const void *src, int w, int h, int pitch_bytes, int integer) {
+/* mode: 0=integer replicate (exact NxN, centered), 1=aspect-fit nearest stretch
+ * (centered, bars), 2=full nearest stretch (fills panel). All nearest → sharp. */
+static uint16_t *panel_build(const void *src, int w, int h, int pitch_bytes, int mode) {
     static uint16_t *pb[2]; static unsigned pbgeo[2]; static int pbi;
     pbi ^= 1;
     if (!pb[pbi]) { pb[pbi] = (uint16_t*)malloc(PANEL_PW*PANEL_PH*2); if (!pb[pbi]) return NULL; pbgeo[pbi] = 0; }
     uint16_t *d = pb[pbi];
     const int sp = pitch_bytes/2; const uint16_t *s = (const uint16_t*)src;
-    if (integer) {
+    if (mode == 0) {
         int n = PANEL_PW/w; int ny = PANEL_PH/h; if (ny<n) n=ny; if (n<1) n=1;
         int dw=w*n, dh=h*n, ox=(PANEL_PW-dw)/2, oy=(PANEL_PH-dh)/2;
         unsigned geo = ((unsigned)dw<<16)|(unsigned)dh;
@@ -439,19 +469,76 @@ static uint16_t *panel_build(const void *src, int w, int h, int pitch_bytes, int
                 for (int x=0;x<w;x++){ uint16_t px=sr[x]; uint16_t *dp=dr+x*n; for(int rx=0;rx<n;rx++) dp[rx]=px; }
             }
             for (int ry=1; ry<n; ry++) memcpy(dr+(size_t)ry*PANEL_PW, dr, (size_t)dw*2); }
-    } else { /* full stretch */
-        static int xm[PANEL_PW]; static int lw=-1;
-        if (w!=lw){ for(int x=0;x<PANEL_PW;x++) xm[x]=x*w/PANEL_PW; lw=w; }
+    } else { /* nearest stretch: full fills the panel, aspect fits centered w/ bars */
+        int dw = PANEL_PW, dh = PANEL_PH, ox = 0, oy = 0;
+        if (mode == 1) {                       /* aspect-fit */
+            if (w * PANEL_PH >= h * PANEL_PW) dh = h * PANEL_PW / w;
+            else                              dw = w * PANEL_PH / h;
+            ox = (PANEL_PW - dw) / 2; oy = (PANEL_PH - dh) / 2;
+        }
+        unsigned geo = ((unsigned)dw<<16)|(unsigned)dh;
+        if (pbgeo[pbi] != geo) { memset(d, 0, PANEL_PW*PANEL_PH*2); pbgeo[pbi] = geo; }
+        /* Src-driven run lengths: dst column x maps to src x*w/dw (nearest,
+         * monotonic), so each src pixel covers a run of rl[sx] dst pixels. One
+         * sequential read per src pixel (no gather), and runs are written with
+         * 32-bit stores when aligned. */
+        static int rl[PANEL_PW]; static int lw=-1, ldw=-1;
+        if (w!=lw || dw!=ldw){ int prev=0; for(int sx=0;sx<w;sx++){ int e=(sx+1)*dw/w; rl[sx]=e-prev; prev=e; } lw=w; ldw=dw; }
         int lsy = -1;
-        for (int y=0;y<PANEL_PH;y++){
-            int sy = y*h/PANEL_PH;
-            uint16_t *dr=d+(size_t)y*PANEL_PW;
-            if (sy == lsy) { memcpy(dr, dr-PANEL_PW, PANEL_PW*2); continue; }
+        for (int y=0;y<dh;y++){
+            int sy = y*h/dh;
+            uint16_t *dr=d+(size_t)(oy+y)*PANEL_PW+ox;
+            if (sy == lsy) { memcpy(dr, dr-PANEL_PW, (size_t)dw*2); continue; }
             lsy = sy;
             const uint16_t *sr=s+(size_t)sy*sp;
-            for(int x=0;x<PANEL_PW;x++) dr[x]=sr[xm[x]];
+            uint16_t *dp=dr;
+            for (int sx=0; sx<w; sx++){
+                uint16_t px=sr[sx]; int r=rl[sx];
+                uint32_t px2=((uint32_t)px<<16)|px;
+                while (r>=2 && !((uintptr_t)dp&3)){ *(uint32_t*)dp=px2; dp+=2; r-=2; }
+                while (r-->0) *dp++=px;
+            }
         }
     }
+    return d;
+}
+
+/* Sharp-bilinear prescale: integer-replicate src by n (fast word-store path)
+ * into a tight n*w × n*h buffer. The GE then does only the small leftover
+ * fractional stretch to the panel (fill/fit) in HW — far cheaper than a full SW
+ * stretch to 640x480, and near-nearest sharp (pixels already n×-doubled). */
+static uint16_t *prescale_int(const void *src, int w, int h, int pitch_bytes,
+                              int n, int *out_w, int *out_h) {
+    static uint16_t *pb[2]; static int pbi;
+    pbi ^= 1;
+    if (!pb[pbi]) { pb[pbi] = (uint16_t*)malloc(PANEL_PW*PANEL_PH*2); if (!pb[pbi]) return NULL; }
+    uint16_t *d = pb[pbi];
+    const int sp = pitch_bytes/2; const uint16_t *s = (const uint16_t*)src;
+    int dw = w * n;
+    for (int y=0; y<h; y++){
+        const uint16_t *sr = s + (size_t)y*sp;
+        uint16_t *dr = d + (size_t)(y*n)*dw;
+        if (n == 2) {
+            uint32_t *d32 = (uint32_t *)dr;
+            int x = 0;
+            /* Read 2 src pixels per iter (one 32-bit load vs two 16-bit) when
+             * the src row is 32-bit aligned; emit two doubled dst words. */
+            if (!(((uintptr_t)sr) & 3)) {
+                const uint32_t *s32 = (const uint32_t *)sr;
+                for (; x + 1 < w; x += 2) {
+                    uint32_t two = s32[x>>1];
+                    uint32_t a = two & 0xffff, b = two >> 16;
+                    d32[x]   = (a<<16)|a;
+                    d32[x+1] = (b<<16)|b;
+                }
+            }
+            for (; x < w; x++){ uint32_t px=sr[x]; d32[x]=(px<<16)|px; }
+        } else {
+            for (int x=0;x<w;x++){ uint16_t px=sr[x]; uint16_t *dp=dr+x*n; for(int k=0;k<n;k++) dp[k]=px; }
+        }
+        for (int ry=1; ry<n; ry++) memcpy(dr+(size_t)ry*dw, dr, (size_t)dw*2);
+    }
+    *out_w = dw; *out_h = h*n;
     return d;
 }
 
@@ -467,16 +554,45 @@ int hwdisp_present_direct(const void *src, int w, int h, int pitch_bytes) {
      *   integer→ SW integer-replicate centered in 640x480 (exact NxN, sharp) —
      *            the GE can't do nearest. panel-size (FrogUI) passes straight.
      * Only integer still pays SW cost. */
-    if (p_aspect) {
+    /* Filter route (game frames only; FrogUI/menu panel-size frames pass straight):
+     *   Bilinear → hand src straight to the GE, fullscreen flag picks fill/fit.
+     *              Fast (HW scale), but soft.
+     *   Nearest  → SW-scale into a 640x480 panel buffer (integer replicate /
+     *              aspect-fit / full-fill), present 1:1. True sharp, costs CPU. */
+    int game = !(w == PANEL_PW && h == PANEL_PH);
+    int sw_nearest = game && g_filter_nearest;
+    int sw_integer = game && !g_filter_nearest && g_panel_scale == 0;
+
+    const void *psrc = src; int pw = w, ph = h, ppitch = pitch_bytes;
+    int staged = 0;
+    int hw_scale = !sw_nearest;   /* whether the GE still scales (needs fill/fit flag) */
+
+    if (sw_nearest && g_filter_sharp && g_panel_scale != 0 /*full/aspect*/) {
+        /* Sharp: prescale by the largest N (>=2) that fits the panel, then let
+         * the GE do the small residual stretch (fill for full, fit for aspect).
+         * Halves the SW cost vs a full 640x480 stretch and reuses the fast
+         * integer path. N=1 (source already big) → fall back to true stretch. */
+        int n = PANEL_PW / w; int ny = PANEL_PH / h; if (ny < n) n = ny;
+        if (n >= 2) {
+            int ow, oh;
+            uint16_t *b = prescale_int(src, w, h, pitch_bytes, n, &ow, &oh);
+            if (b) { psrc = b; pw = ow; ph = oh; ppitch = ow*2; staged = 1; hw_scale = 1; }
+        }
+        if (!staged) {   /* N<2 or alloc fail: true SW stretch to panel */
+            uint16_t *b = panel_build(src, w, h, pitch_bytes, g_panel_scale);
+            if (b) { psrc = b; pw = PANEL_PW; ph = PANEL_PH; ppitch = PANEL_PW*2; staged = 1; }
+        }
+    } else if (sw_nearest || sw_integer) {
+        /* True nearest (full/aspect SW stretch) or exact NxN integer — present
+         * the 640x480 panel buffer 1:1, no HW scaling. */
+        uint16_t *b = panel_build(src, w, h, pitch_bytes, g_panel_scale);
+        if (b) { psrc = b; pw = PANEL_PW; ph = PANEL_PH; ppitch = PANEL_PW*2; staged = 1; }
+    }
+
+    if (p_aspect && hw_scale) {
         /* Driver arg is inverted on this build: 0 = fill, 1 = aspect-fit. */
         int want = (g_panel_scale == 2) ? 0 : 1;   /* full = fill, else fit */
         if (want != g_fs_state) { p_aspect(want); g_fs_state = want; }
-    }
-    const void *psrc = src; int pw = w, ph = h, ppitch = pitch_bytes;
-    int staged = 0;
-    if (!(w == PANEL_PW && h == PANEL_PH) && g_panel_scale == 0 /*integer only*/) {
-        uint16_t *b = panel_build(src, w, h, pitch_bytes, 1);
-        if (b) { psrc = b; pw = PANEL_PW; ph = PANEL_PH; ppitch = PANEL_PW*2; staged = 1; }
     }
     /* disp_frame DMA-reads src asynchronously; handing it the caller's live
      * buffer races the next frame's rendering (font/pixel shimmer during menu

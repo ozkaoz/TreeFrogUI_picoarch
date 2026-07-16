@@ -51,6 +51,9 @@ void hwdisp_set_panel_scale(int mode);
 void hwdisp_present_integer(const void *src, int w, int h, int pitch_bytes);
 
 /* Cleanup. Safe to call even if init failed. */
+/* Edge-sharpen 0-10 via the driver's DIS enhance (whole panel). Cheap, HW. */
+void hwdisp_set_sharpen(int level);
+
 void hwdisp_deinit(void);
 
 #endif

@@ -13,6 +13,7 @@ extern int rewind_enabled;
 extern unsigned audio_buffer_size;
 extern enum scale_size scale_size;
 extern enum scale_filter scale_filter;
+extern int sf3000_sharpness;
 extern enum scale_effect scale_effect;
 extern enum scale_effect default_scale_effect;
 extern int optimize_text;

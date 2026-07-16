@@ -66,14 +66,24 @@ void menu_font_set_px(float pixel_height) {
     font_scale = stbtt_ScaleForPixelHeight(&font_info, font_px);
 }
 
+/* Rasterize glyphs into a static buffer instead of stbtt_GetGlyphBitmap (which
+ * mallocs per glyph per frame). On the memory-pressured device those allocs
+ * transiently failed → draw_char bailed → glyphs randomly vanished for a frame
+ * (the "letters disappear on scroll" bug). No per-frame allocation now. */
+#define GLYPH_MAX 128
 static void draw_char(uint16_t *fb, int fb_w, int fb_h, int x, int y, char c, uint16_t color) {
     if (c >= 'a' && c <= 'z') c = c - 'a' + 'A';
     int gi = stbtt_FindGlyphIndex(&font_info, c);
     if (gi == 0) return;
 
-    int w, h, xoff, yoff;
-    unsigned char *bmp = stbtt_GetGlyphBitmap(&font_info, 0, font_scale, gi, &w, &h, &xoff, &yoff);
-    if (!bmp) return;
+    int x0, y0, x1, y1;
+    stbtt_GetGlyphBitmapBox(&font_info, gi, font_scale, font_scale, &x0, &y0, &x1, &y1);
+    int w = x1 - x0, h = y1 - y0;
+    if (w <= 0 || h <= 0) return;               /* space / empty glyph */
+    if (w > GLYPH_MAX || h > GLYPH_MAX) return; /* oversized: skip (never at menu px) */
+
+    static unsigned char gbuf[GLYPH_MAX * GLYPH_MAX];
+    stbtt_MakeGlyphBitmap(&font_info, gbuf, w, h, w, font_scale, font_scale, gi);
 
     int ascent, descent, line_gap;
     stbtt_GetFontVMetrics(&font_info, &ascent, &descent, &line_gap);
@@ -81,10 +91,10 @@ static void draw_char(uint16_t *fb, int fb_w, int fb_h, int x, int y, char c, ui
 
     for (int row = 0; row < h; row++) {
         for (int col = 0; col < w; col++) {
-            unsigned char a = bmp[row * w + col];
+            unsigned char a = gbuf[row * w + col];
             if (!a) continue;
-            int px = x + xoff + col;
-            int py = y + baseline + yoff + row;
+            int px = x + x0 + col;
+            int py = y + baseline + y0 + row;
             if (px < 0 || px >= fb_w || py < 0 || py >= fb_h) continue;
             uint16_t *dst = &fb[py * fb_w + px];
             if (a >= 255) {
@@ -101,7 +111,6 @@ static void draw_char(uint16_t *fb, int fb_w, int fb_h, int x, int y, char c, ui
             }
         }
     }
-    stbtt_FreeBitmap(bmp, NULL);
 }
 
 void menu_font_cap_metrics(int *baseline_out, int *cap_height_out) {
