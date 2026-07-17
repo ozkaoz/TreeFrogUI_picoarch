@@ -617,15 +617,28 @@ static void menu_loop_video_prep(void) {
 static int menu_loop_video_options(int id, int keys)
 {
 	static int sel = 0;
+	int f0 = scale_filter, z0 = scale_size;
+#ifdef PLATFORM_SF3000
+	int sh0 = sf3000_sharpness;
+#endif
 
 	menu_loop_video_prep();
-	
+
 	me_loop_d(e_menu_video_options, &sel, menu_loop_video_prep, NULL);
 	scale_update_scaler();
 
 #ifdef PLATFORM_SF3000
 	sf3000_apply_snd_gain();   /* recompute + persist the volume gain on exit */
 #endif
+	/* Persist Filter / Screen size / Sharpness per game when changed, so the
+	 * choice survives a relaunch (FrogUI's global filter only fills in the
+	 * default when a game has no config of its own). */
+	if (scale_filter != f0 || scale_size != z0
+#ifdef PLATFORM_SF3000
+	    || sf3000_sharpness != sh0
+#endif
+	   )
+		save_config(1);
 	return 0;
 }
 

@@ -2133,10 +2133,18 @@ if (sf3000_use_hwdisp) {
         }
         int aspect = (src == screen->pixels) || (scale_size != SCALE_SIZE_FULL);
         hwdisp_set_target_aspect(aspect ? PANEL_ASPECT_NUM : 0, aspect ? PANEL_ASPECT_DEN : 0);
-        /* Game frames honour the Filter setting (Nearest/Bilinear/Sharp);
-         * menu/FrogUI (panel-size) frames always bilinear (HW). */
-        hwdisp_set_filter(src != screen->pixels ? scale_filter
-                                                : SCALE_FILTER_BILINEAR);
+        /* Filter routing. The SW Nearest/Sharp paths are R36SX-only (present_direct
+         * + panel_build); SF-class presents through the driver's disp_frame HW
+         * scaler, where the SW-nearest upscale mis-sizes the frame - so SF-class
+         * stays on HW bilinear regardless of the setting.
+         *   R36SX game  → the chosen filter.
+         *   R36SX menu  → Nearest (320x240 → 640x480 is exact 2x = crisp UI).
+         *   SF-class    → always Bilinear (HW). */
+        int fmode;
+        if (!sf3000_is_r36sx())            fmode = SCALE_FILTER_BILINEAR;
+        else if (src != screen->pixels)    fmode = scale_filter;
+        else                               fmode = SCALE_FILTER_NEAREST;
+        hwdisp_set_filter(fmode);
 
         /* FPS / overlay text: render into a copy of src (RGB565), since src
          * itself is owned by the core and may be read-only. */

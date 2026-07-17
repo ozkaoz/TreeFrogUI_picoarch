@@ -71,10 +71,15 @@ static void load_frogui_settings(void) {
 		char *nl = strchr(val, '\n'); if (nl) *nl = '\0';
 		char *cr = strchr(val, '\r'); if (cr) *cr = '\0';
 		if (strcmp(line, "filter") == 0) {
-			if (strcmp(val, "bilinear") == 0)      scale_filter = SCALE_FILTER_BILINEAR;
-			else if (strcmp(val, "nearest") == 0)  scale_filter = SCALE_FILTER_NEAREST;
-			DBG("DBG load_frogui_settings: filter=%s → scale_filter=%d\n",
-			        val, scale_filter);
+			/* FrogUI's filter is only the DEFAULT: if this game has its own
+			 * config (config_override), its in-menu Filter choice wins, so
+			 * don't clobber it here. sharp has no FrogUI keyword — per-game only. */
+			if (!config_override) {
+				if (strcmp(val, "bilinear") == 0)      scale_filter = SCALE_FILTER_BILINEAR;
+				else if (strcmp(val, "nearest") == 0)  scale_filter = SCALE_FILTER_NEAREST;
+			}
+			DBG("DBG load_frogui_settings: filter=%s override=%d → scale_filter=%d\n",
+			        val, config_override, scale_filter);
 		} else if (strcmp(line, "auto_resume") == 0) {
 			g_auto_resume = (strcmp(val, "on") == 0) ? 1 : 0;
 			DBG("DBG load_frogui_settings: auto_resume=%d\n", g_auto_resume);
