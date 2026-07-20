@@ -58,7 +58,15 @@ static int g_filter_on_menu_enter = -1;
  * overrides scale_filter accordingly.  No in-game menu option to change. */
 #define FROGUI_SETTINGS_FILE "/mnt/sdcard/frogui/settings.txt"
 #define LAST_GAME_FILE       "/mnt/sdcard/picoarch/last_game.txt"
-static int g_auto_resume = 0;
+/* Two independent settings (were one "auto_resume" toggle):
+ *  - g_quick_resume: boot behavior — skip FrogUI and jump straight into the
+ *    last-played game on power-on. Settings key stays "auto_resume" for
+ *    upgrade compat (same behavior as before the split).
+ *  - g_autosave_autoload: save-state behavior — auto-load the last auto-save
+ *    on ANY game launch (quick-resume boot OR manual pick from FrogUI), and
+ *    keep auto-saving on pause/quit. New key, defaults off. */
+static int g_quick_resume = 0;
+static int g_autosave_autoload = 0;
 static void load_frogui_settings(void) {
 	FILE *f = fopen(FROGUI_SETTINGS_FILE, "r");
 	if (!f) { DBG("DBG load_frogui_settings: no settings file\n"); return; }
@@ -81,8 +89,11 @@ static void load_frogui_settings(void) {
 			DBG("DBG load_frogui_settings: filter=%s override=%d → scale_filter=%d\n",
 			        val, config_override, scale_filter);
 		} else if (strcmp(line, "auto_resume") == 0) {
-			g_auto_resume = (strcmp(val, "on") == 0) ? 1 : 0;
-			DBG("DBG load_frogui_settings: auto_resume=%d\n", g_auto_resume);
+			g_quick_resume = (strcmp(val, "on") == 0) ? 1 : 0;
+			DBG("DBG load_frogui_settings: quick_resume=%d\n", g_quick_resume);
+		} else if (strcmp(line, "autosave_autoload") == 0) {
+			g_autosave_autoload = (strcmp(val, "on") == 0) ? 1 : 0;
+			DBG("DBG load_frogui_settings: autosave_autoload=%d\n", g_autosave_autoload);
 		}
 	}
 	fclose(f);
@@ -329,7 +340,23 @@ static void fb1_clear(void) {
 }
 /* Only FrogUI restores OSD (via its own retro_init restart). picoarch's
  * menu and game-resume keep fb1 cleared. */
-static void fb1_blank(int blank) { if (blank) fb1_clear(); }
+static void fb1_blank(int blank) {
+	if (!blank) return;
+	if (getenv("PICOARCH_AUTO_RESUME")) {
+		/* Quick-resume boot: cubevol was just spawned (backgrounded, no
+		 * sync) and may not have drawn its first OSD frame yet — a single
+		 * clear here can land BEFORE that first draw and get overwritten.
+		 * Retry across cubevol's typical startup window; it never redraws
+		 * on its own, so once we win the race we stay hidden. */
+		unsetenv("PICOARCH_AUTO_RESUME");
+		for (int i = 0; i < 5; i++) {
+			fb1_clear();
+			if (i < 4) usleep(100000);
+		}
+		return;
+	}
+	fb1_clear();
+}
 static void fb1_menu_enter(void) {
 	if (g_is_frogui) return;
 	/* Filter is locked per-process (set from FrogUI settings at startup);
@@ -535,15 +562,15 @@ void handle_emu_action(emu_action action)
 		sram_write();
 		DBG("DBG EACTION_MENU: sram_write done\n");
 #ifdef PLATFORM_SF3000
-		/* Auto-resume snapshot on menu open — only safe point to save
+		/* Auto-save snapshot on menu open — only safe point to save
 		 * mid-game (game is paused while menu is up). */
-		if (g_auto_resume && !g_is_frogui) {
+		if (g_autosave_autoload && !g_is_frogui) {
 			int prev = state_slot;
-			state_slot = 9;  /* reserved auto-resume slot (10th) */
+			state_slot = 9;  /* reserved auto-save/auto-load slot (10th) */
 			pa_state_write();
 			state_slot = prev;
 			sync();
-			DBG("DBG auto-resume: state saved to slot 99 (menu open)\n");
+			DBG("DBG autosave_autoload: state saved to slot 99 (menu open)\n");
 		}
 #endif
 	}
@@ -855,12 +882,14 @@ int main(int argc, char **argv) {
 	dbg_log("DBG picoarch start: text~%p (hi if 0x2x) argv1=%s next-bin=%s\n",
 	        (void *)&picoarch_for_core, argc > 1 ? argv[1] : "?",
 	        argc > 1 ? picoarch_for_core(argv[1]) : "?");
-	/* AUTO-RESUME: if FrogUI launch and a last-game marker exists with
-	 * auto_resume=on, redirect to that game with state restore.  Marker
-	 * cleared on clean exit to FrogUI (Quit). */
+	/* QUICK RESUME: if FrogUI launch and a last-game marker exists with
+	 * quick-resume (settings key "auto_resume") on, redirect to that game.
+	 * State restore itself only happens if autosave_autoload is also on
+	 * (handled uniformly below for both this redirect and manual launches).
+	 * Marker cleared on clean exit to FrogUI (Quit). */
 	if (argc > 1 && strcmp(argv[1], FROGUI_CORE) == 0) {
 		load_frogui_settings();
-		if (g_auto_resume) {
+		if (g_quick_resume) {
 			char lg_core[512], lg_rom[512];
 			if (read_last_game(lg_core, sizeof(lg_core), lg_rom, sizeof(lg_rom))) {
 				/* ANTI-SOFT-BRICK: a stale/invalid marker (missing rom) or a
@@ -873,15 +902,15 @@ int main(int argc, char **argv) {
 				FILE *tf = fopen("/tmp/resume_tries", "r");
 				if (tf) { if (fscanf(tf, "%d", &tries) != 1) tries = 0; fclose(tf); }
 				if (access(lg_rom, F_OK) != 0 || access(lg_core, F_OK) != 0) {
-					DBG("DBG main: auto-resume target missing (%s) → clearing marker\n", lg_rom);
+					DBG("DBG main: quick-resume target missing (%s) → clearing marker\n", lg_rom);
 					clear_last_game();
 				} else if (tries >= 2) {
-					DBG("DBG main: auto-resume failed %d times this boot → clearing marker\n", tries);
+					DBG("DBG main: quick-resume failed %d times this boot → clearing marker\n", tries);
 					clear_last_game();
 				} else {
 					tf = fopen("/tmp/resume_tries", "w");
 					if (tf) { fprintf(tf, "%d", tries + 1); fclose(tf); }
-					DBG("DBG main: auto-resume redirect → %s + %s (try %d)\n",
+					DBG("DBG main: quick-resume redirect → %s + %s (try %d)\n",
 					        lg_core, lg_rom, tries + 1);
 					setenv("PICOARCH_AUTO_RESUME", "1", 1);
 					execl(picoarch_for_core(lg_core), "picoarch", lg_core, lg_rom, NULL);
@@ -946,21 +975,25 @@ int main(int argc, char **argv) {
 	DBG("DBG main: post-load_config scale_filter=%d scale_size=%d override=%d\n",
 	        scale_filter, scale_size, config_override);
 #ifdef PLATFORM_SF3000
-	/* Filter + auto_resume from FrogUI settings (games only; FrogUI stays SW). */
+	/* Filter + quick-resume/autosave-autoload from FrogUI settings (games
+	 * only; FrogUI stays SW). */
 	if (strcmp(core_path, FROGUI_CORE) != 0) {
 		load_frogui_settings();
-		/* Record current game as "last game" so a power-cycle resumes it. */
-		if (g_auto_resume) {
+		/* Record current game as "last game" so quick-resume can jump
+		 * straight into it on next boot — independent of autosave/autoload. */
+		if (g_quick_resume) {
 			write_last_game(core_path, content_path);
-			/* Always try slot 99 auto state on game launch when auto_resume
-			 * is on (boot redirect OR manual FrogUI launch).  state_resume
-			 * silently falls through if slot 99 file doesn't exist. */
-			resume_slot = 9;  /* reserved auto-resume slot (10th) */
-			DBG("DBG main: auto-resume → resume_slot=99\n");
+		}
+		/* Always try slot 99 auto state on ANY game launch (quick-resume
+		 * boot redirect OR manual FrogUI pick) when autosave_autoload is on.
+		 * state_resume silently falls through if slot 99 file doesn't exist. */
+		if (g_autosave_autoload) {
+			resume_slot = 9;  /* reserved auto-save/auto-load slot (10th) */
+			DBG("DBG main: autosave_autoload → resume_slot=99\n");
 		}
 	}
-	DBG("DBG main: post-FrogUI-override scale_filter=%d auto_resume=%d\n",
-	        scale_filter, g_auto_resume);
+	DBG("DBG main: post-FrogUI-override scale_filter=%d quick_resume=%d autosave_autoload=%d\n",
+	        scale_filter, g_quick_resume, g_autosave_autoload);
 #endif
 	dbg_log("DBG M4: pre core_load\n");
 	core_load();
@@ -970,7 +1003,7 @@ int main(int argc, char **argv) {
 		quit(-1);
 	}
 	dbg_log("DBG M6: content loaded, entering run loop\n");
-	unlink("/tmp/resume_tries");   /* content runs: reset the auto-resume failure cap */
+	unlink("/tmp/resume_tries");   /* content runs: reset the quick-resume failure cap */
 
 	/* Hide cubevol's battery/volume OSD (/dev/fb1) during gameplay. Skipped
 	 * for FrogUI (the menu core) so the menu still shows battery. */
@@ -1040,14 +1073,14 @@ int main(int argc, char **argv) {
 int quit(int code) {
 	menu_finish();
 #ifdef PLATFORM_SF3000
-	/* Final auto-resume save before unloading core. */
-	if (g_auto_resume && !g_is_frogui && current_core.retro_unload_game) {
+	/* Final autosave before unloading core. */
+	if (g_autosave_autoload && !g_is_frogui && current_core.retro_unload_game) {
 		int prev = state_slot;
-		state_slot = 9;  /* reserved auto-resume slot (10th) */
+		state_slot = 9;  /* reserved auto-save/auto-load slot (10th) */
 		pa_state_write();
 		state_slot = prev;
 		sync();
-		DBG("DBG quit: auto-resume final save to slot 99\n");
+		DBG("DBG quit: autosave_autoload final save to slot 99\n");
 	}
 #endif
 	core_unload();
