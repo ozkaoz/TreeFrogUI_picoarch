@@ -60,41 +60,75 @@ int menu_font_init(float pixel_height) {
 int menu_font_ready(void) { return font_loaded; }
 int menu_font_height(void) { return (int)font_px; }
 
-void menu_font_set_px(float pixel_height) {
-    if (pixel_height <= 0 || !font_loaded) return;
-    font_px = pixel_height;
-    font_scale = stbtt_ScaleForPixelHeight(&font_info, font_px);
+/* Persistent glyph cache. draw_char used to run stbtt_GetGlyphBitmapBox +
+ * stbtt_MakeGlyphBitmap (both allocate internally: vertex arrays, active-edge
+ * lists) on EVERY glyph EVERY frame. On the memory-pressured device (SF3500 fw
+ * 1.1) an internal alloc intermittently fails mid-parse → the glyph rasterizes
+ * with a corrupted bbox/bitmap and blits vertically displaced (the "T of EXIT
+ * shifted half a row up" bug), self-healing on the next redraw when the alloc
+ * succeeds. Fix: rasterize each glyph ONCE into this cache and blit from it —
+ * no per-frame stbtt, nothing left to corrupt. Rebuilt only when the pixel size
+ * changes. */
+#define GC_FIRST 32
+#define GC_LAST  126
+#define GC_N     (GC_LAST - GC_FIRST + 1)
+#define GC_MAX   48                 /* max glyph dim cached (menu px ~14 → ~10) */
+typedef struct {
+    unsigned char ready;            /* 0=empty 1=rasterized 2=blank(space) */
+    short w, h, x0, y0;
+    unsigned char bmp[GC_MAX * GC_MAX];
+} gcache_t;
+static gcache_t gcache[GC_N];
+static int      gcache_baseline = 0;
+
+static void gcache_reset(void) {
+    for (int i = 0; i < GC_N; i++) gcache[i].ready = 0;
+    int ascent, descent, line_gap;
+    stbtt_GetFontVMetrics(&font_info, &ascent, &descent, &line_gap);
+    gcache_baseline = (int)(ascent * font_scale);
 }
 
-/* Rasterize glyphs into a static buffer instead of stbtt_GetGlyphBitmap (which
- * mallocs per glyph per frame). On the memory-pressured device those allocs
- * transiently failed → draw_char bailed → glyphs randomly vanished for a frame
- * (the "letters disappear on scroll" bug). No per-frame allocation now. */
-#define GLYPH_MAX 128
-static void draw_char(uint16_t *fb, int fb_w, int fb_h, int x, int y, char c, uint16_t color) {
-    if (c >= 'a' && c <= 'z') c = c - 'a' + 'A';
+/* Rasterize glyph for uppercased char c into the cache (once). NULL if oversized
+ * (caller skips). ready==2 means valid-but-no-ink (space). */
+static gcache_t *gcache_get(char c) {
+    if (c < GC_FIRST || c > GC_LAST) return NULL;
+    gcache_t *g = &gcache[(int)c - GC_FIRST];
+    if (g->ready) return g;
     int gi = stbtt_FindGlyphIndex(&font_info, c);
-    if (gi == 0) return;
-
+    if (gi == 0) { g->w = 0; g->ready = 2; return g; }
     int x0, y0, x1, y1;
     stbtt_GetGlyphBitmapBox(&font_info, gi, font_scale, font_scale, &x0, &y0, &x1, &y1);
     int w = x1 - x0, h = y1 - y0;
-    if (w <= 0 || h <= 0) return;               /* space / empty glyph */
-    if (w > GLYPH_MAX || h > GLYPH_MAX) return; /* oversized: skip (never at menu px) */
+    if (w <= 0 || h <= 0) { g->w = 0; g->ready = 2; return g; }
+    if (w > GC_MAX || h > GC_MAX) return NULL;
+    stbtt_MakeGlyphBitmap(&font_info, g->bmp, w, h, w, font_scale, font_scale, gi);
+    g->w = w; g->h = h; g->x0 = x0; g->y0 = y0; g->ready = 1;
+    return g;
+}
 
-    static unsigned char gbuf[GLYPH_MAX * GLYPH_MAX];
-    stbtt_MakeGlyphBitmap(&font_info, gbuf, w, h, w, font_scale, font_scale, gi);
+void menu_font_set_px(float pixel_height) {
+    if (pixel_height <= 0 || !font_loaded) return;
+    if (pixel_height == font_px && gcache_baseline) return;  /* unchanged */
+    font_px = pixel_height;
+    font_scale = stbtt_ScaleForPixelHeight(&font_info, font_px);
+    gcache_reset();
+    /* Pre-warm at this calm moment (once per size change) so no glyph is
+     * first-rasterized during a memory-pressured frame. */
+    for (char c = GC_FIRST; c <= GC_LAST; c++) gcache_get(c);
+}
 
-    int ascent, descent, line_gap;
-    stbtt_GetFontVMetrics(&font_info, &ascent, &descent, &line_gap);
-    int baseline = (int)(ascent * font_scale);
+static void draw_char(uint16_t *fb, int fb_w, int fb_h, int x, int y, char c, uint16_t color) {
+    if (c >= 'a' && c <= 'z') c = c - 'a' + 'A';
+    if (!gcache_baseline) gcache_reset();
+    gcache_t *g = gcache_get(c);
+    if (!g || g->ready == 2 || g->w == 0) return;   /* oversized / space */
 
-    for (int row = 0; row < h; row++) {
-        for (int col = 0; col < w; col++) {
-            unsigned char a = gbuf[row * w + col];
+    for (int row = 0; row < g->h; row++) {
+        for (int col = 0; col < g->w; col++) {
+            unsigned char a = g->bmp[row * g->w + col];
             if (!a) continue;
-            int px = x + x0 + col;
-            int py = y + baseline + y0 + row;
+            int px = x + g->x0 + col;
+            int py = y + gcache_baseline + g->y0 + row;
             if (px < 0 || px >= fb_w || py < 0 || py >= fb_h) continue;
             uint16_t *dst = &fb[py * fb_w + px];
             if (a >= 255) {
