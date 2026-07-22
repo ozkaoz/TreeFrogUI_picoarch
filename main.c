@@ -67,6 +67,24 @@ static int g_filter_on_menu_enter = -1;
  *    keep auto-saving on pause/quit. New key, defaults off. */
 static int g_quick_resume = 0;
 static int g_autosave_autoload = 0;
+static int g_brightness = -1;   /* parsed from settings; -1 = absent */
+/* Apply the FrogUI brightness setting to /dev/backlight. The display driver
+ * resets the backlight to default when it re-inits on each game launch, and
+ * only FrogUI (the frontend) re-applied it — so games ran at default brightness.
+ * Applied on the GAME path only (FrogUI does its own, after its cubevol restart).
+ * Formula must match FrogUI's cube_set_backlight exactly so frontend and game agree. */
+static void apply_brightness(int level) {
+	if (level < 0)   level = 0;
+	if (level > 100) level = 100;
+	int out = (level < 43) ? (level + 23) : (level * level / 43 + 23);
+	if (out > 255) out = 255;
+	int fd = open("/dev/backlight", O_RDWR);
+	if (fd < 0) { DBG("DBG apply_brightness: /dev/backlight open fail errno=%d\n", errno); return; }
+	if (write(fd, &out, sizeof(int)) != sizeof(int))
+		DBG("DBG apply_brightness: write fail errno=%d\n", errno);
+	close(fd);
+	DBG("DBG apply_brightness: level=%d -> %d\n", level, out);
+}
 static void load_frogui_settings(void) {
 	FILE *f = fopen(FROGUI_SETTINGS_FILE, "r");
 	if (!f) { DBG("DBG load_frogui_settings: no settings file\n"); return; }
@@ -94,6 +112,8 @@ static void load_frogui_settings(void) {
 		} else if (strcmp(line, "autosave_autoload") == 0) {
 			g_autosave_autoload = (strcmp(val, "on") == 0) ? 1 : 0;
 			DBG("DBG load_frogui_settings: autosave_autoload=%d\n", g_autosave_autoload);
+		} else if (strcmp(line, "brightness") == 0) {
+			g_brightness = atoi(val);   /* applied on game path only, see below */
 		}
 	}
 	fclose(f);
@@ -979,6 +999,9 @@ int main(int argc, char **argv) {
 	 * only; FrogUI stays SW). */
 	if (strcmp(core_path, FROGUI_CORE) != 0) {
 		load_frogui_settings();
+		/* Re-apply brightness for games: plat_init's driver re-init reset the
+		 * backlight to default, and only FrogUI restores its own. */
+		if (g_brightness >= 0) apply_brightness(g_brightness);
 		/* Record current game as "last game" so quick-resume can jump
 		 * straight into it on next boot — independent of autosave/autoload. */
 		if (g_quick_resume) {
