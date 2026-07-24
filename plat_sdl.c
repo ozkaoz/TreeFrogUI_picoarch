@@ -2115,9 +2115,15 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
 
 if (sf3000_use_hwdisp) {
         sf3000_hw_heartbeat();  /* mark HW as alive once it has drawn a few frames */
-        /* HW edge-sharpen: bilinear only (nearest is already sharp; enhance
-         * would over-crunch it). Applied on change. */
-        hwdisp_set_sharpen(scale_filter == SCALE_FILTER_NEAREST ? 0 : sf3000_sharpness);
+        /* HW edge-sharpen: skip only for frames that actually take the pixel-exact
+         * SW-nearest path (small game frames under Nearest). Panel-size frames
+         * (FrogUI menu, full-panel game) always go through the driver's HW bilinear
+         * scale regardless of filter, so they still need the enhance — gating on the
+         * global scale_filter alone left the menu blurry after a nearest game.
+         * The width/height test mirrors hwdisp's own `game` flag. Applied on change. */
+        int frame_sw_nearest = (scale_filter == SCALE_FILTER_NEAREST) &&
+                               !(width == PANEL_W && height == PANEL_H);
+        hwdisp_set_sharpen(frame_sw_nearest ? 0 : sf3000_sharpness);
         /* Fast-forward: frame_limit paces emulation at (level+1)*60fps; here we
          * present only 1 of (level+1) frames so the display stays 60fps and the
          * game runs (level+1)x. frame_limit runs first (below) → paces every
