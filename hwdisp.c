@@ -665,6 +665,8 @@ void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {
     }
 
     int pad_w = h * g_aspect_num / g_aspect_den;
+    pad_w &= ~1;   /* odd width wedges disp_frame/HCGE to black on R36SX (e.g.
+                    * 853 for 480-tall, 455 for 256-tall). Round to even. */
     if (pad_w <= w) {
         if (lg) DBG("DBG present#%d: nopad pre p_disp\n", s_n);
         rv = p_disp((void *)psrc, w, h, ppitch);
