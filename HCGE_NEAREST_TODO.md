@@ -1,4 +1,4 @@
-# TODO: HW nearest scaling via HCGE (SF3000)
+# TODO: HW nearest scaling (SF3000 / SF3500 / R36SX)
 
 Status: **parked**. Shipping uses SW nearest + HW bilinear (driver.so). This
 documents the attempt to get HW *nearest* scaling and why it stalled, so it can
@@ -6,6 +6,60 @@ be resumed without re-deriving everything.
 
 Experimental code lives on branch **`hcge-direct`** (`hcge_direct.c`,
 `plat_sdl.c` gate, build-script entry). `main` is clean SW shipping.
+
+---
+
+## CORRECTION (2026-07): the smoothing is the GMA scaler, not the GE
+
+Everything below this section chased the wrong hardware block. The SoC is an
+**ALi M36F**-class part with **open kernel source** ([bnister/PDK_GoBian],
+`pdk/linux/kernel/alidrivers/modules/alifb/`). The pipeline is **GE → GMA → DE**.
+The final upscale-to-panel smoothing we see is the **GMA** picture scaler
+(GMA→DE), *not* the GE `render_options` this doc originally targeted — which is
+why poking GE render_options never killed the blur.
+
+**Nearest is a first-class GMA mode.** In `ali_fb.c` the GMA block header has:
+
+```c
+uint32 scale_mode:1;   // 0 = filter mode (default, smooth); 1 = duplicate (nearest, "debug")
+```
+
+and `gma_m36f_set_scale_param()` (`ali_gma_m36f_lld.c`) picks
+`GMA_SCALE_DUPLICATE` (nearest) vs `GMA_SCALE_FILTER` (the 4-tap-H/3-tap-V
+Lanczos-ish filter) from that bit. `ali_gma.h` defines `GE_SCALE_DUPLICATE` /
+`GE_SCALE_FILTER` and `GE_SET_SCALE_MODE 0x04`.
+
+**Our games/ebook present to fb0 = the OSD/GMA layer**, so the GMA scale filter
+is exactly what smooths them. GoBian firmware already ships an OSD-nearest path:
+`ali_fb.c` has an `#ifdef GOBIAN_OSDSCALE` function `set_gma_scale_info()` that
+sets `scale_mode = GMA_RSZ_DIRECT_RESIZE` (nearest) on every GMA region, driven
+by the **`FBIO_SET_GMA_SCALE_INFO`** ioctl on `/dev/fb0` (handler at ~line 2161).
+
+### Why this is the good path (vs the GE/HCGE attempt below)
+
+- It's a **documented kernel ioctl on /dev/fb0**, not the opaque `hcge_state`
+  struct that crashed the `hcge-direct` branch on an ABI mismatch.
+- Nearest is a real, supported mode (`GMA_RSZ_DIRECT_RESIZE`), no coefficient
+  reversing, no driver binary patch.
+
+### Resume plan (concrete)
+
+1. **Trace driver.so's fb0 ioctls** on device (LD_PRELOAD an `ioctl` shim, or
+   ptrace) during `disp_frame`, to learn the **exact ioctl numbers OUR kernel
+   uses** — the PDK header numbers may not match our (possibly trimmed) kernel.
+   Look for the GMA scale-info ioctl and whether driver.so sets filter mode.
+2. Get `FBIO_SET_GMA_SCALE_INFO`'s value + `struct alifbio_gma_scale_info_pars`
+   (not in `ali_fb.h`/`ali_gma.h` — in a sibling uapi header; or read it off the
+   traced ioctl). Enum: `GMA_RSZ_DIRECT_RESIZE` (nearest) vs `GMA_RSZ_ALPHA_COLOR`.
+3. Add `hwdisp_set_nearest()` that opens `/dev/fb0` and calls that ioctl with
+   `scale_mode = DIRECT_RESIZE` (+ the current h/v src/dst) **after**
+   `video_drivers_init`. Gate on the existing `scale_filter==NEAREST` setting.
+4. Test: sharp = win (no SW upscale, no integer-only limit, fills any size). If
+   the fb-layer ioctl doesn't affect the disp_frame present, the smoothing is on
+   the video (VPO) plane instead — then target `VPO_WIN_ZOOM` / the VPO scaler
+   the same way (`ali_vpo.c`).
+
+Refs: `bnister/PDK_GoBian` → `alifb/ali_fb.c` (GOBIAN_OSDSCALE block + FBIO_SET_GMA_SCALE_INFO @~2161), `ali_gma_m36f_lld.c` (gma_m36f_set_scale_param, GMA_SCALE_DUPLICATE), `ali_gma_filtgen.c` (the tap-filter coeff gen).
 
 ---
 

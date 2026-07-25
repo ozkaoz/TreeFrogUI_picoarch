@@ -1081,6 +1081,16 @@ int main(int argc, char **argv) {
 #endif
 		if (!g_is_frogui)
 			sram_autosave();   /* flush in-game saves without waiting for a clean exit */
+#ifdef PLATFORM_SF3000
+		/* cubevol repaints its fb1 battery/volume OSD on charge-% or volume
+		 * changes, so the single clear at launch goes stale and the icon
+		 * reappears mid-game. Re-clear on a low cadence to catch any repaint
+		 * (transparent memset of a small ARGB plane, ~1-2x/sec — negligible). */
+		if (!g_is_frogui) {
+			static unsigned fb1_fc = 0;
+			if ((++fb1_fc % 30) == 0) fb1_clear();
+		}
+#endif
 	} while (!should_quit);
 
 	if (!g_is_frogui)   /* don't count time spent in the menu */
