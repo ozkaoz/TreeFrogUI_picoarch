@@ -397,6 +397,7 @@ void set_defaults(void)
 	rewind_enabled = 0;   /* off by default; reserves RAM + slows frames when on */
 	audio_buffer_size = 5;
 	scale_size = SCALE_SIZE_ASPECT;  /* default: aspect — integer & full are slower on the HW scaler */
+	aspect_ratio_mode = 1;           /* Native (merged Aspect-ratio control default) */
 	scale_filter = SCALE_FILTER_NEAREST;
 	scale_effect = default_scale_effect;
 	optimize_text = 1;

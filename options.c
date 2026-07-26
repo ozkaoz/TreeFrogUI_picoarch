@@ -17,6 +17,7 @@ unsigned audio_buffer_size;
 enum scale_size scale_size;
 enum scale_filter scale_filter;
 int sf3000_sharpness;   /* HW edge-sharpen 0-10 (fbdev_set_enhance p4) */
+int aspect_ratio_mode;  /* 0=Auto (core-reported), 1=4:3, 2=16:9 */
 enum scale_effect scale_effect;
 enum scale_effect default_scale_effect = SCALE_EFFECT_SCANLINE;
 int optimize_text;

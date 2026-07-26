@@ -32,6 +32,7 @@ static const struct {
 	// CE_NUM(max_upscale),
 	CE_NUM(scale_filter),
 	CE_NUM(sf3000_sharpness),
+	CE_NUM(aspect_ratio_mode),
 	CE_NUM(scale_effect),
 	CE_NUM(optimize_text),
 };

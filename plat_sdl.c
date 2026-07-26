@@ -1939,6 +1939,45 @@ const char *sf3000_driver_path(void) {
 #define PANEL_ASPECT_NUM (sf3000_aspect_is_43() ? 4 : 16)
 #define PANEL_ASPECT_DEN (sf3000_aspect_is_43() ? 3 : 9)
 
+/* Unified "Aspect ratio" control (menu). One list that picks BOTH the scale mode
+ * and the target ratio, so there's no separate Screen-size knob to conflict with:
+ *   Integer   -> exact pixel multiples (no reshape)
+ *   Native    -> whatever the core reports
+ *   4:3 .. 16:10 -> forced ratio (reshapes to it)
+ *   Fill      -> stretch to the whole panel
+ * num==0 means "no forced ratio" (Native/Integer/Fill). ss drives the existing
+ * scale_size machinery. */
+struct aspect_def { const char *name; int ss; int num, den; };
+static const struct aspect_def aspect_defs[] = {
+    { "Integer", SCALE_SIZE_NONE,   0,  0 },
+    { "Native",  SCALE_SIZE_ASPECT, 0,  0 },
+    { "4:3",     SCALE_SIZE_ASPECT, 4,  3 },
+    { "16:9",    SCALE_SIZE_ASPECT, 16, 9 },
+    { "3:2",     SCALE_SIZE_ASPECT, 3,  2 },
+    { "5:4",     SCALE_SIZE_ASPECT, 5,  4 },
+    { "8:7",     SCALE_SIZE_ASPECT, 8,  7 },
+    { "16:10",   SCALE_SIZE_ASPECT, 16, 10 },
+    { "Fill",    SCALE_SIZE_FULL,   0,  0 },
+};
+#define ASPECT_N ((int)(sizeof(aspect_defs)/sizeof(aspect_defs[0])))
+const char *const *sf3000_aspect_names(void) {
+    static const char *names[ASPECT_N + 1];
+    if (!names[0]) { for (int i = 0; i < ASPECT_N; i++) names[i] = aspect_defs[i].name; names[ASPECT_N] = NULL; }
+    return names;
+}
+/* Keep scale_size in sync with the chosen aspect mode (the merged control drives
+ * it). Cheap; called each blit so a menu change takes effect next frame. */
+static void sf3000_apply_aspect(void) {
+    if (aspect_ratio_mode < 0 || aspect_ratio_mode >= ASPECT_N) aspect_ratio_mode = 1;
+    scale_size = (enum scale_size)aspect_defs[aspect_ratio_mode].ss;
+}
+static double sf3000_content_aspect(void) {
+    int m = (aspect_ratio_mode >= 0 && aspect_ratio_mode < ASPECT_N) ? aspect_ratio_mode : 1;
+    const struct aspect_def *d = &aspect_defs[m];
+    if (d->num > 0) return (double)d->num / d->den;
+    return (aspect_ratio > 0.1) ? aspect_ratio : 4.0 / 3.0;   /* Native */
+}
+
 /* Screenshot: dump the current RGB565 frame to a top-down 24bpp BMP. */
 static void sf3000_screenshot(const void *src, int w, int h, int pitch) {
     if (!src || w <= 0 || h <= 0) return;
@@ -1980,6 +2019,7 @@ static void sf3000_screenshot(const void *src, int w, int h, int pitch) {
 }
 
 void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
+    sf3000_apply_aspect();   /* merged Aspect-ratio control drives scale_size */
     /* The driver's disp_frame only accepts stock-sized game frames (<=640x480 —
      * it prints "Frame is too large than screen size" and draws nothing for
      * anything bigger, e.g. Game & Watch artwork at 653x392 or 606x748) plus
@@ -2115,6 +2155,40 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
 
 if (sf3000_use_hwdisp) {
         sf3000_hw_heartbeat();  /* mark HW as alive once it has drawn a few frames */
+
+        /* Aspect-ratio switcher: resample the game frame's width so it displays at
+         * the chosen aspect (Auto=core-reported, 4:3, 16:9). The driver stretches
+         * the presented buffer to fill the panel, so to land display aspect A we
+         * make the content A*height wide; the pad/present step then pillarboxes it.
+         * Menu (screen->pixels) and panel-size (FrogUI) frames are left alone.
+         * Free when the width is already correct (tw == width -> skipped).
+         * ONLY in Aspect mode: Integer keeps exact pixels (no distortion), Full
+         * stretches to fill - neither should be reshaped here. */
+        if (scale_size == SCALE_SIZE_ASPECT &&
+            src != screen->pixels && !(width == PANEL_W && height == PANEL_H)) {
+            double A = sf3000_content_aspect();
+            int tw = (int)(A * height + 0.5);
+            if (tw > 1024) tw = 1024;
+            if (tw > 0 && tw != width) {
+                static uint16_t *arb = NULL; static int arcap = 0;
+                static int axm[1024]; static int alw = -1, atw = -1;
+                int need = tw * height;
+                if (need > arcap) { free(arb); arcap = need + 4096; arb = (uint16_t*)malloc((size_t)arcap * 2); }
+                if (arb) {
+                    if (width != alw || tw != atw) {
+                        for (int dx = 0; dx < tw; dx++) axm[dx] = dx * width / tw;
+                        alw = width; atw = tw;
+                    }
+                    const uint16_t *s = (const uint16_t *)src; int sp = pitch / 2;
+                    for (int y = 0; y < height; y++) {
+                        const uint16_t *sr = s + (size_t)y * sp;
+                        uint16_t *dr = arb + (size_t)y * tw;
+                        for (int dx = 0; dx < tw; dx++) dr[dx] = sr[axm[dx]];
+                    }
+                    src = arb; width = tw; pitch = tw * 2;
+                }
+            }
+        }
         /* HW edge-sharpen: skip only for frames that actually take the pixel-exact
          * SW-nearest path (small game frames under Nearest). Panel-size frames
          * (FrogUI menu, full-panel game) always go through the driver's HW bilinear

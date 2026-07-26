@@ -42,6 +42,7 @@ typedef enum
 	MA_VID_FX,
 	MA_VID_BLANK,
 	MA_VID_SCALE_SIZE,
+	MA_VID_ASPECT,
 	MA_VID_FILTER,
 	MA_VID_SHARPNESS,
 } menu_id;
@@ -536,6 +537,12 @@ static const char h_optimize_text[]        =
 	"text. May affect non-text content.";
 
 static const char *men_scale_size[] = { "Integer", "Aspect", "Full", NULL};
+static const char *men_aspect_ratio[] = {
+	"Integer", "Native", "4:3", "16:9", "3:2", "5:4", "8:7", "16:10", "Fill", NULL };
+static const char h_aspect_ratio[] =
+	"Integer: exact pixel multiples (sharpest).\n"
+	"Native: the ratio the core reports. Then forced ratios,\n"
+	"and Fill: stretch to the whole screen.";
 static const char *men_scale_filter[] = { "Nearest", "Bilinear", "Sharp", NULL};
 static const char h_scale_filter[] =
 	"Nearest/Sharp are software-scaled and can lower FPS.\n"
@@ -584,7 +591,7 @@ static menu_entry e_menu_video_options[] =
 	mee_onoff_h      ("Show CPU %",               0, show_cpu, 1, h_show_cpu),
 	mee_onoff_h      ("Fast forward (SELECT+R1)",  0, ff_enabled, 1, h_ff_enabled),
 	mee_onoff_h      ("Rewind (hold SELECT+B)",   0, rewind_enabled, 1, h_rewind_enabled),
-	mee_cust_s_h     ("Screen size", MA_VID_SCALE_SIZE, 1, mh_scale_size, mgn_scale_size, h_scale_size),
+	mee_enum_h       ("Aspect ratio",  MA_VID_ASPECT, aspect_ratio_mode, men_aspect_ratio, h_aspect_ratio),
 	mee_enum_h       ("Filter",        MA_VID_FILTER, scale_filter, men_scale_filter, h_scale_filter),
 	// mee_range_h      ("Max upscale",              0, max_upscale, 1, 8, h_max_upscale),
 	mee_enum_h       ("Screen effect",    MA_VID_FX, scale_effect, men_scale_effect, h_scale_effect),
