@@ -1977,6 +1977,13 @@ static double sf3000_content_aspect(void) {
     if (d->num > 0) return (double)d->num / d->den;
     return (aspect_ratio > 0.1) ? aspect_ratio : 4.0 / 3.0;   /* Native */
 }
+/* Only a FORCED ratio (4:3/16:9/...) needs the per-frame SW width-resample.
+ * Native/Integer/Fill keep the old zero-cost path (the driver's HW scale does
+ * the work) - resampling them regressed every core on the default setting. */
+static int sf3000_aspect_forced(void) {
+    int m = (aspect_ratio_mode >= 0 && aspect_ratio_mode < ASPECT_N) ? aspect_ratio_mode : 1;
+    return aspect_defs[m].num > 0;
+}
 
 /* Screenshot: dump the current RGB565 frame to a top-down 24bpp BMP. */
 static void sf3000_screenshot(const void *src, int w, int h, int pitch) {
@@ -2156,37 +2163,43 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
 if (sf3000_use_hwdisp) {
         sf3000_hw_heartbeat();  /* mark HW as alive once it has drawn a few frames */
 
-        /* Aspect-ratio switcher: resample the game frame's width so it displays at
-         * the chosen aspect (Auto=core-reported, 4:3, 16:9). The driver stretches
-         * the presented buffer to fill the panel, so to land display aspect A we
-         * make the content A*height wide; the pad/present step then pillarboxes it.
-         * Menu (screen->pixels) and panel-size (FrogUI) frames are left alone.
-         * Free when the width is already correct (tw == width -> skipped).
-         * ONLY in Aspect mode: Integer keeps exact pixels (no distortion), Full
-         * stretches to fill - neither should be reshaped here. */
-        if (scale_size == SCALE_SIZE_ASPECT &&
+        /* Forced aspect ratio (4:3/16:9/...): scale the frame ONCE into a
+         * panel-sized buffer, placing the content in the forced-aspect rect
+         * (letterboxed with black bars), then present that 1:1. This is the whole
+         * reshape in a single pass (no separate resample + driver rescale) and is
+         * device-agnostic - only the panel resolution differs. Native/Integer/Fill
+         * never enter here (sf3000_aspect_forced() is false) so the default path
+         * stays exactly as before, zero cost. Menu/panel-size frames excluded. */
+        if (scale_size == SCALE_SIZE_ASPECT && sf3000_aspect_forced() &&
             src != screen->pixels && !(width == PANEL_W && height == PANEL_H)) {
+            int PW = PANEL_W, PH = PANEL_H;
             double A = sf3000_content_aspect();
-            int tw = (int)(A * height + 0.5);
-            if (tw > 1024) tw = 1024;
-            if (tw > 0 && tw != width) {
-                static uint16_t *arb = NULL; static int arcap = 0;
-                static int axm[1024]; static int alw = -1, atw = -1;
-                int need = tw * height;
-                if (need > arcap) { free(arb); arcap = need + 4096; arb = (uint16_t*)malloc((size_t)arcap * 2); }
-                if (arb) {
-                    if (width != alw || tw != atw) {
-                        for (int dx = 0; dx < tw; dx++) axm[dx] = dx * width / tw;
-                        alw = width; atw = tw;
-                    }
-                    const uint16_t *s = (const uint16_t *)src; int sp = pitch / 2;
-                    for (int y = 0; y < height; y++) {
-                        const uint16_t *sr = s + (size_t)y * sp;
-                        uint16_t *dr = arb + (size_t)y * tw;
-                        for (int dx = 0; dx < tw; dx++) dr[dx] = sr[axm[dx]];
-                    }
-                    src = arb; width = tw; pitch = tw * 2;
+            int cw = (int)(PH * A + 0.5), ch = PH;          /* fit A-rect in panel */
+            if (cw > PW) { cw = PW; ch = (int)(PW / A + 0.5); }
+            int ox = (PW - cw) / 2, oy = (PH - ch) / 2;
+            static uint16_t *panb = NULL; static int pancap = 0;
+            static int xm[1024], ym[1024];
+            static int lw = -1, lh = -1, lcw = -1, lch = -1, lp = -1;
+            if (PW * PH > pancap) { free(panb); pancap = PW * PH; panb = (uint16_t*)malloc((size_t)pancap * 2); lp = -1; }
+            if (panb && cw > 0 && ch > 0 && cw <= 1024 && ch <= 1024) {
+                if (width != lw || height != lh || cw != lcw || ch != lch || PW != lp) {
+                    for (int dx = 0; dx < cw; dx++) xm[dx] = dx * width  / cw;
+                    for (int dy = 0; dy < ch; dy++) ym[dy] = dy * height / ch;
+                    memset(panb, 0, (size_t)PW * PH * 2);   /* black bars, once per geometry */
+                    lw = width; lh = height; lcw = cw; lch = ch; lp = PW;
                 }
+                const uint16_t *s = (const uint16_t *)src; int sp = pitch / 2;
+                for (int dy = 0; dy < ch; dy++) {
+                    const uint16_t *sr = s + (size_t)ym[dy] * sp;
+                    uint16_t *dr = panb + (size_t)(oy + dy) * PW + ox;
+                    for (int dx = 0; dx < cw; dx++) dr[dx] = sr[xm[dx]];
+                }
+                hwdisp_set_sharpen(sf3000_sharpness);
+                hwdisp_set_target_aspect(0, 0);            /* already panel-final */
+                hwdisp_set_filter(SCALE_FILTER_BILINEAR);  /* 1:1 present, no re-upscale */
+                if (!(sf3000_is_r36sx() && hwdisp_present_direct(panb, PW, PH, PW * 2)))
+                    hwdisp_present(panb, PW, PH, PW * 2);
+                return;
             }
         }
         /* HW edge-sharpen: skip only for frames that actually take the pixel-exact
