@@ -15,6 +15,8 @@
 #include <stdarg.h>
 #include <time.h>
 #include <locale.h> // savestate date
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "menu.h"
 #include "fonts.h"
@@ -534,10 +536,69 @@ static void menu_draw_begin(int need_bg, int no_borders)
 	}
 }
 
+/* Battery indicator in the pause menu (matches FrogUI's). Reads the raw ADC
+ * nodes cubevol uses: /dev/check_adc1 = battery byte, /dev/check_adc2 = charging.
+ * Same default curve as FrogUI (breakpoints 64/153/224/255 -> 0/50/80/100). */
+/* battery = /dev/check_adc1, charge detect = /dev/check_adc5 (adc5 ~0 idle,
+ * ~140 charging; adc2 doesn't exist on these devices). Persistent O_RDWR fds -
+ * these nodes are flaky when reopened per poll. */
+static int menu_adc_read(int slot)
+{
+	static int fd[2] = { -2, -2 };
+	static const char *node[2] = { "/dev/check_adc1", "/dev/check_adc5" };
+	unsigned char b = 0;
+	if (slot < 0 || slot > 1) return -1;
+	if (fd[slot] == -2) fd[slot] = open(node[slot], O_RDWR);
+	if (fd[slot] < 0) return -1;
+	lseek(fd[slot], 0, SEEK_SET);
+	return (read(fd[slot], &b, 1) == 1) ? b : -1;
+}
+static int menu_battery_pct(int *charging)
+{
+	int a1 = menu_adc_read(0), a5 = menu_adc_read(1), pct = -1;
+	*charging = (a5 >= 64) ? 1 : 0;
+	if (a1 >= 0) {
+		static const int rx[] = { 64, 153, 224, 255 };
+		static const int py[] = {  0,  50,  80, 100 };
+		int r = a1, i;
+		if (r <= rx[0]) pct = 0;
+		else { pct = 100; for (i = 1; i < 4; i++) if (r <= rx[i]) {
+			int sp = rx[i]-rx[i-1]; pct = py[i-1] + (py[i]-py[i-1])*(r-rx[i-1])/(sp?sp:1); break; } }
+	}
+	return pct;
+}
+
+static void menu_draw_battery(void)
+{
+	int charging, pct = menu_battery_pct(&charging);
+	if (pct < 0) return;
+	if (pct > 100) pct = 100;
+	unsigned short *fb = (unsigned short *)g_menuscreen_ptr;
+	int pp = g_menuscreen_pp;
+	int bw = 22, bh = 11, pad = 2, nub = 2;
+	int x = g_menuscreen_w - 8 - bw - nub, y = 6;
+	unsigned short out = (unsigned short)menu_text_color;    /* theme text color */
+	unsigned short bg  = (unsigned short)menu_sel_text_color;/* theme dark */
+	unsigned short fillc = charging ? 0x2FE6 : ((pct <= 15) ? 0xF800 : out);
+	if (x < 0 || y + bh >= g_menuscreen_h) return;
+	/* outline */
+	for (int i = 0; i < bw; i++) { fb[y*pp+x+i] = out; fb[(y+bh-1)*pp+x+i] = out; }
+	for (int j = 0; j < bh; j++) { fb[(y+j)*pp+x] = out; fb[(y+j)*pp+x+bw-1] = out; }
+	/* interior bg */
+	for (int j = 1; j < bh-1; j++) for (int i = 1; i < bw-1; i++) fb[(y+j)*pp+x+i] = bg;
+	/* nub */
+	for (int j = bh/2 - 2; j <= bh/2 + 1; j++) for (int i = 0; i < nub; i++) fb[(y+j)*pp+x+bw+i] = out;
+	/* fill */
+	int inner = bw - 2*pad, fwid = inner*pct/100; if (fwid < 0) fwid = 0; if (fwid > inner) fwid = inner;
+	for (int j = pad; j < bh-pad; j++) for (int i = 0; i < fwid; i++) fb[(y+j)*pp+x+pad+i] = fillc;
+	if (charging) { int cx = x+bw/2; for (int j = pad; j < bh-pad; j++) fb[(y+j)*pp+cx + ((j<bh/2)?-1:1)] = 0xFFFF; }
+}
+
 static void menu_draw_end(void)
 {
 	if (borders_pending)
 		menu_darken_text_bg();
+	menu_draw_battery();
 	plat_video_menu_end();
 }
 
