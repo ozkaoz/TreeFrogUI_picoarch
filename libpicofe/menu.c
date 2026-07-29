@@ -568,6 +568,20 @@ static int menu_battery_pct(int *charging)
 	return pct;
 }
 
+/* "Battery Colour Mode" from frogui/settings.txt (cached): solid colour light. */
+static int menu_battery_color_mode(void)
+{
+	static int cached = -1;
+	if (cached < 0) {
+		FILE *f = fopen("/mnt/sdcard/frogui/settings.txt", "r");
+		cached = 0;
+		if (f) { char l[128]; while (fgets(l, sizeof l, f))
+			if (!strncmp(l, "battery_color=on", 16)) { cached = 1; break; }
+			fclose(f); }
+	}
+	return cached;
+}
+
 static void menu_draw_battery(void)
 {
 	int charging, pct = menu_battery_pct(&charging);
@@ -575,6 +589,20 @@ static void menu_draw_battery(void)
 	if (pct > 100) pct = 100;
 	unsigned short *fb = (unsigned short *)g_menuscreen_ptr;
 	int pp = g_menuscreen_pp;
+
+	if (menu_battery_color_mode()) {
+		/* solid colour dot: green 70-100, blue 30-70, red 0-30 (charging=green) */
+		unsigned short c = charging ? 0x2FE6
+			: (pct >= 70) ? 0x2FE6 : (pct >= 30) ? 0x041F : 0xF800;
+		int d = 12, x = g_menuscreen_w - 8 - d, y = 6;
+		if (x < 0 || y + d >= g_menuscreen_h) return;
+		for (int j = 0; j < d; j++) for (int i = 0; i < d; i++) {
+			int dx = i - d/2, dy = j - d/2;
+			if (dx*dx + dy*dy <= (d/2)*(d/2)) fb[(y+j)*pp + x + i] = c;
+		}
+		return;
+	}
+
 	int bw = 22, bh = 11, pad = 2, nub = 2;
 	int x = g_menuscreen_w - 8 - bw - nub, y = 6;
 	unsigned short out = (unsigned short)menu_text_color;    /* theme text color */
