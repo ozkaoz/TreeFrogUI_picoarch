@@ -13,9 +13,11 @@ CFLAGS="$CFLAGS -I./ -I./libretro-common/include/"
 CFLAGS="$CFLAGS -I$SYSROOT/usr/include"
 CFLAGS="$CFLAGS -I$SYSROOT/usr/bin-o32/../../usr/include/SDL"
 CFLAGS="$CFLAGS -D_GNU_SOURCE=1 -D_REENTRANT"
-CFLAGS="$CFLAGS -DPICO_HOME_DIR='\"/.picoarch/\"'"
-CFLAGS="$CFLAGS -DCONTENT_DIR='\"/mnt/SDCARD/Roms\"'"
 CFLAGS="$CFLAGS -DUSE_C_SCALER -DPLATFORM_SF3000 -Ofast -DNDEBUG"
+DEFINES=(
+    '-DPICO_HOME_DIR="/.picoarch/"'
+    '-DCONTENT_DIR="/mnt/SDCARD/Roms"'
+)
 
 # High text base: frees 0x0-0x1fffffff for lightrec identity map.
 # -mlong-calls ensures all GOT/PLT refs work at high addr; -Ttext-segment
@@ -29,11 +31,11 @@ cd /home/tomaszz/sf3000-work/picoarch
 
 for src in libpicofe/input.c libpicofe/in_sdl.c libpicofe/linux/in_evdev.c libpicofe/linux/plat.c libpicofe/fonts.c libpicofe/readpng.c libpicofe/config_file.c cheat.c config.c content.c core.c menu.c menu_font.c main.c options.c overrides.c patch.c scale.c scaler_neon.c unzip.c util.c; do
     obj="${src%.c}.o"
-    $CC $CFLAGS -c -o "$obj" "$src"
+    $CC $CFLAGS "${DEFINES[@]}" -c -o "$obj" "$src"
 done
 
-$CC $CFLAGS -c -o plat_sf3000.o plat_sf3000.c
-$CC $CFLAGS -c -o hwdisp.o hwdisp.c
+$CC $CFLAGS "${DEFINES[@]}" -c -o plat_sf3000.o plat_sf3000.c
+$CC $CFLAGS "${DEFINES[@]}" -c -o hwdisp.o hwdisp.c
 
 $CC $OBJS $LDFLAGS -o picoarch_hi
 
