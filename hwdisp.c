@@ -648,8 +648,11 @@ void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {
     static int fsi;
     const void *psrc = src;
     int ppitch = pitch_bytes;
-    if (!fs[0]) { fs[0] = (uint16_t*)malloc(640*480*2); fs[1] = (uint16_t*)malloc(640*480*2); }
-    if (fs[0] && fs[1] && w <= 640 && h <= 480) {
+    /* Cover the driver's full source envelope, not only 640x480 game frames.
+     * FrogUI is 854x480 on SF3500; leaving that live buffer unstaged lets HCGE
+     * race the next menu redraw and eventually deliver SIGBUS. */
+    if (!fs[0]) { fs[0] = (uint16_t*)malloc(HW_BUFSZ); fs[1] = (uint16_t*)malloc(HW_BUFSZ); }
+    if (fs[0] && fs[1] && w <= HW_W && h <= HW_H) {
         uint16_t *dst = fs[fsi]; fsi ^= 1;
         for (int y = 0; y < h; y++)
             memcpy(dst + (size_t)y*w, (const uint8_t*)src + (size_t)y*pitch_bytes, (size_t)w*2);
