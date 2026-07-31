@@ -2031,9 +2031,11 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
      * it prints "Frame is too large than screen size" and draws nothing for
      * anything bigger, e.g. Game & Watch artwork at 653x392 or 606x748) plus
      * exactly panel-size frames (FrogUI's path, proven on every boot). So any
-     * frame over 640x480 that isn't already panel-size gets nearest-scaled to
-     * aspect-fit and composed centered into a full panel-size canvas, black
-     * bars baked in. */
+     * frame over 640x480 that isn't already panel-size gets composed into a
+     * full panel-size canvas. Use the selected display aspect here: oversized
+     * cores such as Cap32 render a wide pixel buffer but report the intended
+     * display aspect separately. Baking the raw buffer ratio into this canvas
+     * made Native too wide and made every aspect-menu choice look identical. */
     /* STICKY: once one frame composes, compose every later frame too. Cores
      * that zoom (G&W Multi Screen alternates full view 606x748 <-> zoomed
      * 343x193) otherwise flap the frame size, and each size change makes the
@@ -2054,10 +2056,14 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
         static uint16_t *fit_buf = NULL;
         static int fit_cap = 0;
         int dw = PANEL_W, dh = PANEL_H;
-        if ((int64_t)width * PANEL_H > (int64_t)height * PANEL_W)
-            dh = (int)((int64_t)height * PANEL_W / width);   /* wider: fit width */
-        else
-            dw = (int)((int64_t)width * PANEL_H / height);   /* taller: fit height */
+        if (scale_size != SCALE_SIZE_FULL) {
+            double target_aspect = sf3000_content_aspect();
+            dw = (int)(PANEL_H * target_aspect + 0.5);
+            if (dw > PANEL_W) {
+                dw = PANEL_W;
+                dh = (int)(PANEL_W / target_aspect + 0.5);
+            }
+        }
         if (dw < 1) dw = 1;
         if (dh < 1) dh = 1;
         if (PANEL_W * PANEL_H > fit_cap) {
