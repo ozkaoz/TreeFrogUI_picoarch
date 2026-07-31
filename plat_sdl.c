@@ -2231,6 +2231,15 @@ if (sf3000_use_hwdisp) {
             if ((++ff_ctr) % div) ff_skip = 1;
         }
         int aspect = (src == screen->pixels) || (scale_size != SCALE_SIZE_FULL);
+        /* Native game frames must retain their own geometry.  Applying the
+         * panel's 16:9 target here expands portrait/vector frames (e.g. VecX
+         * 330x410) beyond the driver's 640x480 input limit, so disp_frame
+         * rejects them and the result is a black screen. Forced aspect modes
+         * are composed above; Native should let the driver scale the source.
+         */
+        if (src != screen->pixels && scale_size == SCALE_SIZE_ASPECT &&
+            !sf3000_aspect_forced())
+            aspect = 0;
         hwdisp_set_target_aspect(aspect ? PANEL_ASPECT_NUM : 0, aspect ? PANEL_ASPECT_DEN : 0);
         /* Filter routing. The SW Nearest/Sharp paths are R36SX-only (present_direct
          * + panel_build); SF-class presents through the driver's disp_frame HW
