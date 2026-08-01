@@ -346,17 +346,22 @@ int screenshot(void) {
 #include <stdlib.h>
 int g_is_frogui = 0;
 static void fb1_clear(void) {
-	int fd = open("/dev/fb1", O_RDWR);
-	if (fd < 0) return;
-	struct fb_fix_screeninfo finfo;
-	if (ioctl(fd, FBIOGET_FSCREENINFO, &finfo) == 0 && finfo.smem_len > 0) {
-		void *mem = mmap(NULL, finfo.smem_len, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
-		if (mem != MAP_FAILED) {
-			memset(mem, 0, finfo.smem_len);
-			munmap(mem, finfo.smem_len);
+	/* Persistent mmap (open once): the old per-call open+mmap+munmap+close ran
+	 * during gameplay (every 30 frames) and churned syscalls + a full-plane
+	 * mmap each time. Map once, then just memset. */
+	static void *mem = NULL; static size_t len = 0; static int inited = 0;
+	if (!inited) {
+		inited = 1;
+		int fd = open("/dev/fb1", O_RDWR);
+		if (fd < 0) return;
+		struct fb_fix_screeninfo finfo;
+		if (ioctl(fd, FBIOGET_FSCREENINFO, &finfo) == 0 && finfo.smem_len > 0) {
+			void *m = mmap(NULL, finfo.smem_len, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+			if (m != MAP_FAILED) { mem = m; len = finfo.smem_len; }
 		}
+		close(fd);   /* mmap survives close */
 	}
-	close(fd);
+	if (mem) memset(mem, 0, len);
 }
 /* Only FrogUI restores OSD (via its own retro_init restart). picoarch's
  * menu and game-resume keep fb1 cleared. */
@@ -1083,13 +1088,12 @@ int main(int argc, char **argv) {
 		if (!g_is_frogui)
 			sram_autosave();   /* flush in-game saves without waiting for a clean exit */
 #ifdef PLATFORM_SF3000
-		/* cubevol repaints its fb1 battery/volume OSD on charge-% or volume
-		 * changes, so the single clear at launch goes stale and the icon
-		 * reappears mid-game. Re-clear on a low cadence to catch any repaint
-		 * (transparent memset of a small ARGB plane, ~1-2x/sec — negligible). */
+		/* cubevol repaints its fb1 OSD only on a charge-% tick or volume press
+		 * (rare), so re-clearing ~once a minute is plenty to keep it hidden with
+		 * effectively zero in-game cost. */
 		if (!g_is_frogui) {
 			static unsigned fb1_fc = 0;
-			if ((++fb1_fc % 30) == 0) fb1_clear();
+			if ((++fb1_fc % 3600) == 0) fb1_clear();
 		}
 #endif
 	} while (!should_quit);
@@ -1118,6 +1122,10 @@ int quit(int code) {
 	}
 #endif
 	core_unload();
+	/* FrogUI also runs with cubevol's fb1 overlay visible for its battery
+	 * indicator.  On shutdown that layer must be cleared completely; clearing
+	 * only fb0 leaves the old corner glyphs over the shutdown logo. */
+	fb1_clear();
 	fb1_blank(0);   /* restore OSD overlay; next process re-blanks if needed */
 
 #ifdef PLATFORM_SF3000
