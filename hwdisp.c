@@ -251,6 +251,14 @@ static void clear_fb0_for_shutdown(void) {
         msync(mem, fi.smem_len, MS_SYNC);
         munmap(mem, fi.smem_len);
     }
+    /* Ensure the cleared fb0 is the active layer before the shutdown process
+     * starts drawing its logo. */
+    int dis = open("/dev/dis", O_RDWR);
+    if (dis >= 0) {
+        struct { int a, b, c; } route = {1, 0, 0};
+        ioctl(dis, 0xc00c0e0c, &route);
+        close(dis);
+    }
     close(fd);
 }
 
@@ -806,6 +814,9 @@ void hwdisp_deinit(void) {
     extern void sf3000_dump_fb_state(const char *);
     if (!g_active) { DBG("DBG hwdisp_deinit: not active\n"); return; }
     sf3000_dump_fb_state("hwdisp_deinit/pre");
+    /* Clear before teardown as well: the driver may still be scanning its
+     * current buffer while p_deinit switches routing back to fb0. */
+    clear_fb0_for_shutdown();
     if (p_deinit) p_deinit();
     sf3000_dump_fb_state("hwdisp_deinit/post-p_deinit");
     clear_fb0_for_shutdown();
