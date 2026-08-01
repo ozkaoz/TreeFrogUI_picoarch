@@ -2238,9 +2238,19 @@ if (sf3000_use_hwdisp) {
          * are composed above; Native should let the driver scale the source.
          */
         if (src != screen->pixels && scale_size == SCALE_SIZE_ASPECT &&
-            !sf3000_aspect_forced())
-            aspect = 0;
-        hwdisp_set_target_aspect(aspect ? PANEL_ASPECT_NUM : 0, aspect ? PANEL_ASPECT_DEN : 0);
+            !sf3000_aspect_forced()) {
+            /* Native means the core-reported geometry, not panel fill.  A zero
+             * target selects the driver's fullscreen path and stretches the
+             * frame on SF-class panels.  Use a fixed-point ratio here so the
+             * existing HW aspect-fit path can letterbox/pillarbox correctly. */
+            double ar = (aspect_ratio > 0.1) ? aspect_ratio : (4.0 / 3.0);
+            int native_num = (int)(ar * 1000.0 + 0.5);
+            if (native_num < 1) native_num = 1;
+            hwdisp_set_target_aspect(native_num, 1000);
+        } else {
+            hwdisp_set_target_aspect(aspect ? PANEL_ASPECT_NUM : 0,
+                                     aspect ? PANEL_ASPECT_DEN : 0);
+        }
         /* Filter routing. The SW Nearest/Sharp paths are R36SX-only (present_direct
          * + panel_build); SF-class presents through the driver's disp_frame HW
          * scaler, where the SW-nearest upscale mis-sizes the frame - so SF-class
