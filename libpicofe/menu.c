@@ -538,7 +538,7 @@ static void menu_draw_begin(int need_bg, int no_borders)
 
 /* Battery indicator in the pause menu (matches FrogUI's). Reads the raw ADC
  * nodes cubevol uses: /dev/check_adc1 = battery byte, /dev/check_adc2 = charging.
- * Same default curve as FrogUI (breakpoints 64/153/224/255 -> 0/50/80/100). */
+ * Same default curve as FrogUI (breakpoints 64/153/224 -> 0/50/100). */
 /* battery = /dev/check_adc1, charge detect = /dev/check_adc5 (adc5 ~0 idle,
  * ~140 charging; adc2 doesn't exist on these devices). Persistent O_RDWR fds -
  * these nodes are flaky when reopened per poll. */
@@ -555,17 +555,26 @@ static int menu_adc_read(int slot)
 }
 static int menu_battery_pct(int *charging)
 {
-	int a1 = menu_adc_read(0), a5 = menu_adc_read(1), pct = -1;
-	*charging = (a5 >= 64) ? 1 : 0;
-	if (a1 >= 0) {
-		static const int rx[] = { 64, 153, 224, 255 };
-		static const int py[] = {  0,  50,  80, 100 };
-		int r = a1, i;
-		if (r <= rx[0]) pct = 0;
-		else { pct = 100; for (i = 1; i < 4; i++) if (r <= rx[i]) {
-			int sp = rx[i]-rx[i-1]; pct = py[i-1] + (py[i]-py[i-1])*(r-rx[i-1])/(sp?sp:1); break; } }
+	/* Re-read ~every 5s (menu redraws often); ADC changes slowly. */
+	static int cached = -1, cached_chg = 0;
+	static time_t last = 0;
+	time_t now = time(NULL);
+	if (cached < 0 || now - last >= 5) {
+		last = now;
+		int a1 = menu_adc_read(0), a5 = menu_adc_read(1);
+		cached_chg = (a5 >= 64) ? 1 : 0;
+		cached = -1;
+		if (a1 >= 0) {
+			/* Match FrogUI's deliberately broad three-state gauge.  The old
+			 * interpolated curve made the in-game indicator disagree with the
+			 * main menu for the same ADC reading. */
+			if (a1 < 100) cached = 25;
+			else if (a1 < 145) cached = 50;
+			else cached = 100;
+		}
 	}
-	return pct;
+	*charging = cached_chg;
+	return cached;
 }
 
 /* "Battery Colour Mode" from frogui/settings.txt (cached): solid colour light. */
@@ -590,24 +599,17 @@ static void menu_draw_battery(void)
 	unsigned short *fb = (unsigned short *)g_menuscreen_ptr;
 	int pp = g_menuscreen_pp;
 
-	if (menu_battery_color_mode()) {
-		/* solid colour dot: green 70-100, blue 30-70, red 0-30 (charging=green) */
-		unsigned short c = charging ? 0x2FE6
-			: (pct >= 70) ? 0x2FE6 : (pct >= 30) ? 0x041F : 0xF800;
-		int d = 12, x = g_menuscreen_w - 8 - d, y = 6;
-		if (x < 0 || y + d >= g_menuscreen_h) return;
-		for (int j = 0; j < d; j++) for (int i = 0; i < d; i++) {
-			int dx = i - d/2, dy = j - d/2;
-			if (dx*dx + dy*dy <= (d/2)*(d/2)) fb[(y+j)*pp + x + i] = c;
-		}
-		return;
-	}
-
+	/* Same glyph in both modes; Battery Colour Mode just changes the fill to a
+	 * level band (green/blue/red). */
 	int bw = 22, bh = 11, pad = 2, nub = 2;
 	int x = g_menuscreen_w - 8 - bw - nub, y = 6;
 	unsigned short out = (unsigned short)menu_text_color;    /* theme text color */
 	unsigned short bg  = (unsigned short)menu_sel_text_color;/* theme dark */
-	unsigned short fillc = charging ? 0x2FE6 : ((pct <= 15) ? 0xF800 : out);
+	unsigned short fillc;
+	if (menu_battery_color_mode())
+		fillc = charging ? 0x2FE6 : (pct >= 70) ? 0x2FE6 : (pct >= 30) ? 0x041F : 0xF800;
+	else
+		fillc = charging ? 0x2FE6 : ((pct <= 15) ? 0xF800 : out);
 	if (x < 0 || y + bh >= g_menuscreen_h) return;
 	/* outline */
 	for (int i = 0; i < bw; i++) { fb[y*pp+x+i] = out; fb[(y+bh-1)*pp+x+i] = out; }
