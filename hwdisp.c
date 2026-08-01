@@ -232,6 +232,28 @@ int hwdisp_init(void) {
 
 int hwdisp_active(void) { return g_active; }
 
+/* The stock shutdown/logo process renders through fb0 after the HCGE driver
+ * exits.  Leave that framebuffer clean; otherwise the previous panel-sized
+ * FrogUI frame can remain visible around the logo for a few refreshes. */
+static void clear_fb0_for_shutdown(void) {
+    int fd = open("/dev/fb0", O_RDWR);
+    if (fd < 0) return;
+    struct fb_fix_screeninfo fi;
+    if (ioctl(fd, FBIOGET_FSCREENINFO, &fi) < 0 || fi.smem_len < sizeof(uint32_t)) {
+        close(fd);
+        return;
+    }
+    void *mem = mmap(NULL, fi.smem_len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (mem != MAP_FAILED) {
+        uint32_t *p = (uint32_t *)mem;
+        size_t n = fi.smem_len / sizeof(*p);
+        for (size_t i = 0; i < n; i++) p[i] = 0xFF000000u;
+        msync(mem, fi.smem_len, MS_SYNC);
+        munmap(mem, fi.smem_len);
+    }
+    close(fd);
+}
+
 void hwdisp_set_target_aspect(int num, int den) {
     g_aspect_num = num;
     g_aspect_den = den;
@@ -786,6 +808,7 @@ void hwdisp_deinit(void) {
     sf3000_dump_fb_state("hwdisp_deinit/pre");
     if (p_deinit) p_deinit();
     sf3000_dump_fb_state("hwdisp_deinit/post-p_deinit");
+    clear_fb0_for_shutdown();
     if (g_fbmem) { munmap(g_fbmem, g_fbsize); g_fbmem = NULL; }
     if (g_fbfd >= 0) { close(g_fbfd); g_fbfd = -1; }
     if (g_pad_buf) { free(g_pad_buf); g_pad_buf = NULL; g_pad_cap = 0; g_pad_w = 0; g_pad_h = 0; }
