@@ -1977,14 +1977,52 @@ static double sf3000_content_aspect(void) {
     if (d->num > 0) return (double)d->num / d->den;
     return (aspect_ratio > 0.1) ? aspect_ratio : 4.0 / 3.0;   /* Native */
 }
-/* Only a FORCED ratio (4:3/16:9/...) needs the per-frame SW width-resample.
- * Native/Integer/Fill keep the old zero-cost path (the driver's HW scale does
- * the work) - resampling them regressed every core on the default setting. */
 static int sf3000_aspect_forced(void) {
     int m = (aspect_ratio_mode >= 0 && aspect_ratio_mode < ASPECT_N) ? aspect_ratio_mode : 1;
     return aspect_defs[m].num > 0;
 }
 
+/* Preserve a forced ratio by reshaping only the small core frame; the stock
+ * driver still performs the expensive enlargement to the panel in hardware. */
+static void sf3000_hw_present_frame(const void *src, int w, int h, int pitch,
+                                    int game_frame) {
+    if (game_frame && scale_size == SCALE_SIZE_NONE && !sf3000_is_r36sx()) {
+        hwdisp_present_integer(src, w, h, pitch);
+        return;
+    }
+
+    if (game_frame && scale_size == SCALE_SIZE_ASPECT && sf3000_aspect_forced()) {
+        int m = (aspect_ratio_mode >= 0 && aspect_ratio_mode < ASPECT_N) ? aspect_ratio_mode : 1;
+        const struct aspect_def *d = &aspect_defs[m];
+        int tw = (h * d->num + d->den / 2) / d->den;
+        tw = (tw + 1) & ~1; /* odd source widths wedge this driver */
+        if (tw > 0 && tw <= 1280 && h > 0 && h <= 720) {
+            static uint16_t *buf[2];
+            static int cap, bi;
+            int need = tw * h;
+            if (need > cap) {
+                free(buf[0]); free(buf[1]);
+                cap = need + 4096;
+                buf[0] = (uint16_t *)malloc((size_t)cap * 2);
+                buf[1] = (uint16_t *)malloc((size_t)cap * 2);
+            }
+            if (buf[0] && buf[1]) {
+                uint16_t *dst = buf[bi]; bi ^= 1;
+                const uint16_t *s = (const uint16_t *)src;
+                int sp = pitch / 2;
+                for (int y = 0; y < h; y++) {
+                    const uint16_t *sr = s + (size_t)y * sp;
+                    uint16_t *dr = dst + (size_t)y * tw;
+                    for (int x = 0; x < tw; x++) dr[x] = sr[x * w / tw];
+                }
+                src = dst; w = tw; pitch = tw * 2;
+            }
+        }
+    }
+
+    if (!(sf3000_is_r36sx() && hwdisp_present_direct(src, w, h, pitch)))
+        hwdisp_present(src, w, h, pitch);
+}
 /* Screenshot: dump the current RGB565 frame to a top-down 24bpp BMP. */
 static void sf3000_screenshot(const void *src, int w, int h, int pitch) {
     if (!src || w <= 0 || h <= 0) return;
@@ -2168,46 +2206,7 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
 
 if (sf3000_use_hwdisp) {
         sf3000_hw_heartbeat();  /* mark HW as alive once it has drawn a few frames */
-
-        /* Forced aspect ratio (4:3/16:9/...): scale the frame ONCE into a
-         * panel-sized buffer, placing the content in the forced-aspect rect
-         * (letterboxed with black bars), then present that 1:1. This is the whole
-         * reshape in a single pass (no separate resample + driver rescale) and is
-         * device-agnostic - only the panel resolution differs. Native/Integer/Fill
-         * never enter here (sf3000_aspect_forced() is false) so the default path
-         * stays exactly as before, zero cost. Menu/panel-size frames excluded. */
-        if (scale_size == SCALE_SIZE_ASPECT && sf3000_aspect_forced() &&
-            src != screen->pixels && !(width == PANEL_W && height == PANEL_H)) {
-            int PW = PANEL_W, PH = PANEL_H;
-            double A = sf3000_content_aspect();
-            int cw = (int)(PH * A + 0.5), ch = PH;          /* fit A-rect in panel */
-            if (cw > PW) { cw = PW; ch = (int)(PW / A + 0.5); }
-            int ox = (PW - cw) / 2, oy = (PH - ch) / 2;
-            static uint16_t *panb = NULL; static int pancap = 0;
-            static int xm[1024], ym[1024];
-            static int lw = -1, lh = -1, lcw = -1, lch = -1, lp = -1;
-            if (PW * PH > pancap) { free(panb); pancap = PW * PH; panb = (uint16_t*)malloc((size_t)pancap * 2); lp = -1; }
-            if (panb && cw > 0 && ch > 0 && cw <= 1024 && ch <= 1024) {
-                if (width != lw || height != lh || cw != lcw || ch != lch || PW != lp) {
-                    for (int dx = 0; dx < cw; dx++) xm[dx] = dx * width  / cw;
-                    for (int dy = 0; dy < ch; dy++) ym[dy] = dy * height / ch;
-                    memset(panb, 0, (size_t)PW * PH * 2);   /* black bars, once per geometry */
-                    lw = width; lh = height; lcw = cw; lch = ch; lp = PW;
-                }
-                const uint16_t *s = (const uint16_t *)src; int sp = pitch / 2;
-                for (int dy = 0; dy < ch; dy++) {
-                    const uint16_t *sr = s + (size_t)ym[dy] * sp;
-                    uint16_t *dr = panb + (size_t)(oy + dy) * PW + ox;
-                    for (int dx = 0; dx < cw; dx++) dr[dx] = sr[xm[dx]];
-                }
-                hwdisp_set_sharpen(sf3000_sharpness);
-                hwdisp_set_target_aspect(0, 0);            /* already panel-final */
-                hwdisp_set_filter(SCALE_FILTER_BILINEAR);  /* 1:1 present, no re-upscale */
-                if (!(sf3000_is_r36sx() && hwdisp_present_direct(panb, PW, PH, PW * 2)))
-                    hwdisp_present(panb, PW, PH, PW * 2);
-                return;
-            }
-        }
+        int game_frame = (src != screen->pixels);
         /* HW edge-sharpen: skip only for frames that actually take the pixel-exact
          * SW-nearest path (small game frames under Nearest). Panel-size frames
          * (FrogUI menu, full-panel game) always go through the driver's HW bilinear
@@ -2230,27 +2229,13 @@ if (sf3000_use_hwdisp) {
             int div = (g_ff_level == 3) ? 2 : (g_ff_level + 1);
             if ((++ff_ctr) % div) ff_skip = 1;
         }
-        int aspect = (src == screen->pixels) || (scale_size != SCALE_SIZE_FULL);
-        /* Native game frames must retain their own geometry.  Applying the
-         * panel's 16:9 target here expands portrait/vector frames (e.g. VecX
-         * 330x410) beyond the driver's 640x480 input limit, so disp_frame
-         * rejects them and the result is a black screen. Forced aspect modes
-         * are composed above; Native should let the driver scale the source.
-         */
-        if (src != screen->pixels && scale_size == SCALE_SIZE_ASPECT &&
-            !sf3000_aspect_forced()) {
-            /* Native means the core-reported geometry, not panel fill.  A zero
-             * target selects the driver's fullscreen path and stretches the
-             * frame on SF-class panels.  Use a fixed-point ratio here so the
-             * existing HW aspect-fit path can letterbox/pillarbox correctly. */
-            double ar = (aspect_ratio > 0.1) ? aspect_ratio : (4.0 / 3.0);
-            int native_num = (int)(ar * 1000.0 + 0.5);
-            if (native_num < 1) native_num = 1;
-            hwdisp_set_target_aspect(native_num, 1000);
-        } else {
-            hwdisp_set_target_aspect(aspect ? PANEL_ASPECT_NUM : 0,
-                                     aspect ? PANEL_ASPECT_DEN : 0);
-        }
+        int aspect = !game_frame || (scale_size != SCALE_SIZE_FULL);
+        /* The driver expands its submitted source envelope to the 16:9 panel.
+         * Native therefore keeps the core frame untouched but pads it into a
+         * panel-aspect envelope. Forced modes reshape the small frame first,
+         * then use that same envelope. Fill deliberately submits no envelope. */
+        hwdisp_set_target_aspect(aspect ? PANEL_ASPECT_NUM : 0,
+                                 aspect ? PANEL_ASPECT_DEN : 0);
         /* Filter routing. The SW Nearest/Sharp paths are R36SX-only (present_direct
          * + panel_build); SF-class presents through the driver's disp_frame HW
          * scaler, where the SW-nearest upscale mis-sizes the frame - so SF-class
@@ -2322,8 +2307,7 @@ if (sf3000_use_hwdisp) {
                 }
                 if (ff_skip) return;    /* FF: drop this present to keep display 60fps */
                 /* R36SX: disp_frame hangs → direct fb0 write. SF3000: disp_frame. */
-                if (!(sf3000_is_r36sx() && hwdisp_present_direct(compose_buf, width, height, width * 2)))
-                    hwdisp_present(compose_buf, width, height, width * 2);
+                sf3000_hw_present_frame(compose_buf, width, height, width * 2, 1);
                 return;
             }
         }
@@ -2351,8 +2335,7 @@ if (sf3000_use_hwdisp) {
                 src = dst; width = PANEL_W; height = PANEL_H; pitch = PANEL_W * 2;
             }
         }
-        if (!(sf3000_is_r36sx() && hwdisp_present_direct(src, width, height, pitch)))
-            hwdisp_present(src, width, height, pitch);
+        sf3000_hw_present_frame(src, width, height, pitch, game_frame);
         return;
     }
     /* Re-assert display controller → fb0 page.
