@@ -469,6 +469,58 @@ static void upscale_nearest(const void *src, int w, int h, int pitch_bytes) {
 static int g_panel_scale = 2;       /* default full */
 void hwdisp_set_panel_scale(int m) { g_panel_scale = m; }
 
+/* Cheap Integer-mode staging shared by SF-class and R36SX. Instead of expanding
+ * to the complete panel in software, center the native frame in a panel/N
+ * envelope and let HCGE supply the N enlargement. Keep two buffers because the
+ * driver's DMA can still be reading the previously submitted frame. */
+#define INT_ENV_MAX_W 854
+#define INT_ENV_MAX_H 480
+static uint16_t *g_int_env[2];
+static int g_int_env_i;
+static int g_int_env_w[2], g_int_env_h[2];
+static int g_int_src_w[2], g_int_src_h[2];
+
+static uint16_t *integer_envelope_build(const void *src, int w, int h,
+                                        int pitch_bytes, int panel_w, int panel_h,
+                                        int *out_w, int *out_h) {
+    int nx = panel_w / w, ny = panel_h / h;
+    int n = nx < ny ? nx : ny;
+    if (n < 1) n = 1;
+
+    int ew = (panel_w + n - 1) / n;
+    int eh = (panel_h + n - 1) / n;
+    /* Odd source widths wedge some driver builds. The at-most-one-pixel wider
+     * envelope changes horizontal scale by under 0.5% for common modes. */
+    ew = (ew + 1) & ~1;
+    if (ew < w) ew = (w + 1) & ~1;
+    if (eh < h) eh = h;
+    if (ew > INT_ENV_MAX_W || eh > INT_ENV_MAX_H) return NULL;
+
+    if (!g_int_env[0])
+        g_int_env[0] = (uint16_t *)malloc(INT_ENV_MAX_W * INT_ENV_MAX_H * 2);
+    if (!g_int_env[1])
+        g_int_env[1] = (uint16_t *)malloc(INT_ENV_MAX_W * INT_ENV_MAX_H * 2);
+    if (!g_int_env[0] || !g_int_env[1]) return NULL;
+
+    int bi = g_int_env_i;
+    g_int_env_i ^= 1;
+    uint16_t *dst = g_int_env[bi];
+    if (g_int_env_w[bi] != ew || g_int_env_h[bi] != eh ||
+        g_int_src_w[bi] != w || g_int_src_h[bi] != h) {
+        memset(dst, 0, (size_t)ew * eh * 2);
+        g_int_env_w[bi] = ew; g_int_env_h[bi] = eh;
+        g_int_src_w[bi] = w;  g_int_src_h[bi] = h;
+    }
+
+    int ox = (ew - w) / 2, oy = (eh - h) / 2;
+    for (int y = 0; y < h; y++)
+        memcpy(dst + (size_t)(oy + y) * ew + ox,
+               (const uint8_t *)src + (size_t)y * pitch_bytes,
+               (size_t)w * 2);
+    *out_w = ew; *out_h = eh;
+    return dst;
+}
+
 /* Ping-pong output buffers: disp_frame DMA-reads the previous frame async, so we
  * write the other buffer — the result is safe to hand straight to disp_frame,
  * no extra staging copy (present_direct skips its copy for panel_build output).
@@ -595,6 +647,7 @@ int hwdisp_present_direct(const void *src, int w, int h, int pitch_bytes) {
 
     const void *psrc = src; int pw = w, ph = h, ppitch = pitch_bytes;
     int staged = 0;
+    int integer_hw = 0;
     int hw_scale = !sw_nearest;   /* whether the GE still scales (needs fill/fit flag) */
 
     if (sw_nearest && g_filter_sharp && g_panel_scale != 0 /*full/aspect*/) {
@@ -612,7 +665,17 @@ int hwdisp_present_direct(const void *src, int w, int h, int pitch_bytes) {
             uint16_t *b = panel_build(src, w, h, pitch_bytes, g_panel_scale);
             if (b) { psrc = b; pw = PANEL_PW; ph = PANEL_PH; ppitch = PANEL_PW*2; staged = 1; }
         }
-    } else if (sw_nearest || sw_integer) {
+    } else if (sw_integer) {
+        /* Bilinear + Integer: submit the small panel/N envelope and let HCGE
+         * enlarge it. This replaces v1.0.12's expensive full 640x480 SW blit. */
+        int ow, oh;
+        uint16_t *b = integer_envelope_build(src, w, h, pitch_bytes,
+                                             PANEL_PW, PANEL_PH, &ow, &oh);
+        if (b) {
+            psrc = b; pw = ow; ph = oh; ppitch = ow * 2;
+            staged = 1; hw_scale = 1; integer_hw = 1;
+        }
+    } else if (sw_nearest) {
         /* True nearest (full/aspect SW stretch) or exact NxN integer — present
          * the 640x480 panel buffer 1:1, no HW scaling. */
         uint16_t *b = panel_build(src, w, h, pitch_bytes, g_panel_scale);
@@ -621,7 +684,7 @@ int hwdisp_present_direct(const void *src, int w, int h, int pitch_bytes) {
 
     if (p_aspect && hw_scale) {
         /* Driver arg is inverted on this build: 0 = fill, 1 = aspect-fit. */
-        int want = (g_panel_scale == 2) ? 0 : 1;   /* full = fill, else fit */
+        int want = integer_hw ? 0 : ((g_panel_scale == 2) ? 0 : 1);
         if (want != g_fs_state) { p_aspect(want); g_fs_state = want; }
     }
     /* disp_frame DMA-reads src asynchronously; handing it the caller's live
@@ -718,96 +781,38 @@ void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {
     if (lg) DBG("DBG present#%d: pad post p_disp rv=%d\n", s_n, rv);
 }
 
-/* Panel-integer present: SW nearest-upscale src by largest integer N where
- * N*w<=854 && N*h<=480, center result in 854x480 black panel buffer, send to
- * driver with filter=0 (pass-through). True integer pixel ratio on panel. */
+/* Panel-integer present for SF-class panels.
+ *
+ * v1.0.12 expanded both axes in software into a complete 854x480 frame.  That
+ * made Integer the only aspect mode doing a full-panel CPU blit every frame and
+ * was enough to starve emulation/audio on this small MIPS core.
+ *
+ * Submit the native frame inside a panel/N envelope and let HCGE supply the N
+ * enlargement, so the visible image remains N high and approximately N wide
+ * (854 is not divisible by 2 or 3). This cuts staging and DMA traffic by roughly
+ * N squared while retaining the integer-sized viewport. */
 #ifndef PANEL_W
 #define PANEL_W 854
 #endif
 #ifndef PANEL_H
 #define PANEL_H 480
 #endif
-#define PANEL_PITCH (PANEL_W * 2)
-
-static uint16_t *g_panel_buf = NULL;
-
 void hwdisp_present_integer(const void *src, int w, int h, int pitch_bytes) {
     if (!g_active || !p_disp || !src) return;
     if (w <= 0 || h <= 0) return;
 
-    if (!g_panel_buf) {
-        g_panel_buf = (uint16_t *)malloc(PANEL_W * PANEL_H * sizeof(uint16_t));
-        if (!g_panel_buf) return;
-        memset(g_panel_buf, 0, PANEL_W * PANEL_H * sizeof(uint16_t));
+    int env_w, env_h;
+    uint16_t *dst = integer_envelope_build(src, w, h, pitch_bytes,
+                                           PANEL_W, PANEL_H, &env_w, &env_h);
+    if (!dst) return;
+
+    /* SF-class semantics: 1 = non-uniform fill. The envelope is deliberately
+     * panel/N, so fill lets HCGE provide the missing integer enlargement. */
+    if (p_aspect && g_fs_state != 1) {
+        p_aspect(1);
+        g_fs_state = 1;
     }
-
-    int sx = PANEL_W / w;
-    int sy = PANEL_H / h;
-    int n = sx < sy ? sx : sy;
-    if (n < 1) n = 1;
-    int dw = w * n, dh = h * n;
-    if (dw > PANEL_W) dw = PANEL_W;
-    if (dh > PANEL_H) dh = PANEL_H;
-    int ox = (PANEL_W - dw) / 2;
-    int oy = (PANEL_H - dh) / 2;
-
-    /* Clear borders only when geometry changes */
-    static int last_dw = -1, last_dh = -1;
-    if (dw != last_dw || dh != last_dh) {
-        memset(g_panel_buf, 0, PANEL_W * PANEL_H * sizeof(uint16_t));
-        last_dw = dw; last_dh = dh;
-    }
-
-    const int sp = pitch_bytes / 2;
-    const uint16_t *s = (const uint16_t *)src;
-
-    /* Row expand (one src row → n dst rows), per-pixel replicate. */
-    for (int srow_i = 0; srow_i < h; srow_i++) {
-        const uint16_t *srow = s + srow_i * sp;
-        uint16_t *drow = g_panel_buf + (size_t)(oy + srow_i * n) * PANEL_W + ox;
-
-        switch (n) {
-        case 1:
-            memcpy(drow, srow, (size_t)w * 2);
-            break;
-        case 2: {
-            uint32_t *d32 = (uint32_t *)drow;
-            for (int x = 0; x < w; x++) {
-                uint32_t p = srow[x];
-                d32[x] = p | (p << 16);
-            }
-            break;
-        }
-        case 3:
-            for (int x = 0; x < w; x++) {
-                uint16_t p = srow[x];
-                drow[x*3] = drow[x*3+1] = drow[x*3+2] = p;
-            }
-            break;
-        case 4: {
-            uint32_t *d32 = (uint32_t *)drow;
-            for (int x = 0; x < w; x++) {
-                uint32_t p = srow[x];
-                uint32_t pp = p | (p << 16);
-                d32[x*2] = pp; d32[x*2+1] = pp;
-            }
-            break;
-        }
-        default:
-            for (int x = 0; x < w; x++) {
-                uint16_t p = srow[x];
-                uint16_t *dp = drow + x * n;
-                for (int k = 0; k < n; k++) dp[k] = p;
-            }
-            break;
-        }
-
-        /* Vertical replication: copy this row n-1 more times */
-        for (int v = 1; v < n; v++)
-            memcpy(drow + (size_t)v * PANEL_W, drow, (size_t)dw * 2);
-    }
-
-    p_disp(g_panel_buf, PANEL_W, PANEL_H, PANEL_PITCH);
+    p_disp(dst, env_w, env_h, env_w * 2);
 }
 
 void hwdisp_deinit(void) {
@@ -824,7 +829,13 @@ void hwdisp_deinit(void) {
     if (g_fbfd >= 0) { close(g_fbfd); g_fbfd = -1; }
     if (g_pad_buf) { free(g_pad_buf); g_pad_buf = NULL; g_pad_cap = 0; g_pad_w = 0; g_pad_h = 0; }
     if (g_near_buf) { free(g_near_buf); g_near_buf = NULL; }
-    if (g_panel_buf) { free(g_panel_buf); g_panel_buf = NULL; }
+    if (g_int_env[0]) { free(g_int_env[0]); g_int_env[0] = NULL; }
+    if (g_int_env[1]) { free(g_int_env[1]); g_int_env[1] = NULL; }
+    g_int_env_i = 0;
+    g_int_env_w[0] = g_int_env_w[1] = 0;
+    g_int_env_h[0] = g_int_env_h[1] = 0;
+    g_int_src_w[0] = g_int_src_w[1] = 0;
+    g_int_src_h[0] = g_int_src_h[1] = 0;
     if (g_handle) { dlclose(g_handle); g_handle = NULL; }
     p_init = NULL; p_deinit = NULL; p_disp = NULL;
     g_active = 0;

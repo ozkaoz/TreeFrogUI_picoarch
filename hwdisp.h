@@ -43,11 +43,10 @@ int hwdisp_present_direct(const void *src, int w, int h, int pitch_bytes);
 /* R36SX panel scale mode for disp_frame present: 0=integer, 1=aspect, 2=full. */
 void hwdisp_set_panel_scale(int mode);
 
-/* Present with TRUE panel-integer nearest scaling.
- * Internally: SW nearest-upscales src by N (largest integer where N*w<=854
- * and N*h<=480), centers in an 854x480 black panel buffer, sends to driver
- * with filter=0 (HW pass-through). Result: exact N:1 pixel ratio on panel,
- * with letterbox/pillarbox black bars. */
+/* Present in an integer-sized viewport without a full-panel CPU scale.
+ * Centers the native frame in a panel/N envelope and lets HCGE perform the
+ * enlargement. Vertical scale is exact; horizontal scale can differ by under
+ * one output pixel because the 854-wide panel is not divisible by 2 or 3. */
 void hwdisp_present_integer(const void *src, int w, int h, int pitch_bytes);
 
 /* Cleanup. Safe to call even if init failed. */
