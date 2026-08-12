@@ -1139,6 +1139,7 @@ int quit(int code) {
 
 	/* Read launch.txt first to know the next process. */
 	int next_is_standalone = 0;
+	int next_is_video_player = 0;
 	char core_path[512] = "", rom_path[512] = "", standalone_rom[512] = "";
 	FILE *lf = fopen(LAUNCH_FILE, "r");
 	if (lf) {
@@ -1148,6 +1149,8 @@ int quit(int code) {
 		fclose(lf);
 		unlink(LAUNCH_FILE);
 		next_is_standalone = (strcmp(core_path, "standalone") == 0 && rom_path[0]);
+		next_is_video_player = next_is_standalone &&
+			strstr(rom_path, "/video_player") != NULL;
 	}
 
 	DBG("DBG quit: use_hwdisp=%d next_standalone=%d core_path[0]=%d rom_path[0]=%d\n",
@@ -1167,9 +1170,22 @@ int quit(int code) {
 		FILE *m = fopen("/tmp/picoarch_hcge_was_active", "w");
 		if (m) { fprintf(m, "%d", (int)getppid()); fclose(m); }
 	}
-	if (!next_is_standalone) {
+	/* Most legacy standalone apps expect the warm HCGE state. libffplayer is
+	 * different: it owns the hardware video plane itself, and blocks forever
+	 * if picoarch leaves driver.so/HCGE active across exec. Release HCGE only
+	 * for our native video player; preserve the proven PS1/DOS/Rockbox path. */
+	if (!next_is_standalone || next_is_video_player) {
 		hwdisp_deinit();
 		DBG("DBG quit: hwdisp_deinit done\n");
+	}
+	/* libffplayer also owns AUDDEC/I2SO. Release only picoarch's proprietary
+	 * audio engine here. A full plat_finish() closes SDL/fb0 and prevents the
+	 * firmware player loader from reaching main(), while leaving audio active
+	 * makes audio-master video wait forever. */
+	if (next_is_video_player) {
+		extern void sf3000_sound_finish_for_exec(void);
+		sf3000_sound_finish_for_exec();
+		DBG("DBG quit: audio cleanup done for video player\n");
 	}
 	/* Keep fb0/dis fds open across exec — closing them breaks the panel
 	 * state recovery (was working in commit 6537239). */

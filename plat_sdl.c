@@ -1016,9 +1016,11 @@ static void sf3000_load_snd_gain(void) {
  * sound_driver_playframe() DAC write. The emu thread only enqueues into this
  * SPSC ring and never blocks, so audio over/underrun can never freeze the
  * emulator. Video stays the sole frame pacer. */
-#define SF3000_ARING_FRAMES 4096          /* power of two, ~93ms @ 44100Hz */
+#define SF3000_ARING_FRAMES 4096          /* power of two, ~85ms @ 48000Hz */
 #define SF3000_ARING_MASK   (SF3000_ARING_FRAMES - 1)
-#define SF3000_ACHUNK       735           /* 44100/60, one video frame's audio */
+#define SF3000_ACHUNK       480           /* 10ms at the fixed 48kHz DAC rate */
+#define SF3000_APREFILL     1440          /* 30ms cushion for expensive scaled frames */
+#define SF3000_AGRACE_POLLS 6             /* tolerate 12ms of producer jitter */
 
 static struct audio_frame sf3000_aring[SF3000_ARING_FRAMES];
 static unsigned           sf3000_aring_w = 0;   /* producer: emu thread   */
@@ -1035,6 +1037,9 @@ static void *sf3000_audio_thread_fn(void *unused)
 {
 	(void)unused;
 	struct audio_frame chunk[SF3000_ACHUNK];
+	uint64_t next_us = 0;
+	int primed = 0;
+	int short_polls = 0;
 
 	/* Init the DAC ON THIS THREAD. The SF3500/HD/SF3100 driver keeps its audio
 	 * handle thread-local, so sound_driver_init() and sound_driver_playframe()
@@ -1068,12 +1073,26 @@ static void *sf3000_audio_thread_fn(void *unused)
 
 		pthread_mutex_lock(&sf3000_aring_mtx);
 		unsigned avail = sf3000_aring_w - sf3000_aring_r;  /* free-running */
-		if (avail >= SF3000_ACHUNK) {
+		/* Libretro cores submit audio in one-video-frame bursts. Buffer 30ms
+		 * before starting, then feed the non-blocking stock driver at a steady
+		 * 48kHz instead of inheriting that burst cadence. A scaled frame can be
+		 * a few milliseconds late on these CPUs, so do not turn the first short
+		 * poll into a full re-prime (and an audible 20ms gap). */
+		if (!primed && avail >= SF3000_APREFILL)
+			primed = 1;
+		if (primed && avail >= SF3000_ACHUNK) {
 			for (int i = 0; i < SF3000_ACHUNK; i++) {
 				chunk[i] = sf3000_aring[sf3000_aring_r & SF3000_ARING_MASK];
 				sf3000_aring_r++;
 			}
 			have_chunk = 1;
+			short_polls = 0;
+		} else if (primed && avail < SF3000_ACHUNK) {
+			if (++short_polls >= SF3000_AGRACE_POLLS) {
+				primed = 0;
+				short_polls = 0;
+				next_us = 0;
+			}
 		}
 		pthread_mutex_unlock(&sf3000_aring_mtx);
 
@@ -1093,9 +1112,26 @@ static void *sf3000_audio_thread_fn(void *unused)
 			}
 		}
 
-		/* Blocks until the DAC drains — but on THIS thread, not the emu. */
+		/* Some stock driver variants return immediately while others block.
+		 * Clock the non-blocking case at exactly chunk/48000 seconds; if the
+		 * call already blocked, the deadline has passed and no sleep is added. */
 		if (sf3000_sound_driver_playframe)
 			sf3000_sound_driver_playframe(chunk, SF3000_ACHUNK);
+		{
+			struct timespec ts;
+			clock_gettime(CLOCK_MONOTONIC, &ts);
+			uint64_t now = (uint64_t)ts.tv_sec * 1000000u +
+			               (uint64_t)ts.tv_nsec / 1000u;
+			if (!next_us) next_us = now;
+			next_us += (uint64_t)SF3000_ACHUNK * 1000000u / SAMPLE_RATE;
+			if (next_us > now) {
+				uint64_t delay = next_us - now;
+				if (delay > 20000u) delay = 20000u;
+				usleep((useconds_t)delay);
+			} else if (now - next_us > 20000u) {
+				next_us = now;
+			}
+		}
 	}
 	/* Deinit on the same thread that init'd + played (thread-local handle). */
 	if (sf3000_sound_driver_deinit)
@@ -1124,6 +1160,16 @@ static void plat_sound_finish(void)
 	}
 #endif
 }
+
+#ifdef PLATFORM_SF3000
+/* Standalone media players need AUDDEC/I2SO released before exec, but calling
+ * all of plat_finish() also tears down SDL/fb0 state that the firmware loader
+ * expects to survive the handoff. Keep this deliberately audio-only. */
+void sf3000_sound_finish_for_exec(void)
+{
+	plat_sound_finish();
+}
+#endif
 
 const char *sf3000_driver_path(void);
 
@@ -1996,9 +2042,16 @@ static void sf3000_hw_present_frame(const void *src, int w, int h, int pitch,
         const struct aspect_def *d = &aspect_defs[m];
         int tw = (h * d->num + d->den / 2) / d->den;
         tw = (tw + 1) & ~1; /* odd source widths wedge this driver */
+        /* If the core already has the requested geometry, let the driver scale
+         * it directly. This is common for 320x240 content forced to 4:3. */
+        if (tw == w)
+            goto present;
         if (tw > 0 && tw <= 1280 && h > 0 && h <= 720) {
             static uint16_t *buf[2];
             static int cap, bi;
+            static uint16_t xmap[1280], xbase[1280];
+            static uint8_t xfrac[1280];
+            static int map_w = -1, map_tw = -1;
             int need = tw * h;
             if (need > cap) {
                 free(buf[0]); free(buf[1]);
@@ -2007,19 +2060,63 @@ static void sf3000_hw_present_frame(const void *src, int w, int h, int pitch,
                 buf[1] = (uint16_t *)malloc((size_t)cap * 2);
             }
             if (buf[0] && buf[1]) {
+                /* Division on this MIPS CPU is expensive. Geometry changes
+                 * rarely, so build the nearest-neighbour lookup once instead
+                 * of doing tw*h integer divisions on every frame. */
+                if (map_w != w || map_tw != tw) {
+                    for (int x = 0; x < tw; x++) {
+                        xmap[x] = (uint16_t)((unsigned)x * (unsigned)w /
+                                            (unsigned)tw);
+                        /* Pixel-centred source coordinate for Bilinear. Keep a
+                         * compact 5-bit weight so the frame loop needs only
+                         * packed RGB565 multiplies, never division. */
+                        int den = tw * 2;
+                        int num = (x * 2 + 1) * w - tw;
+                        if (num <= 0) {
+                            xbase[x] = 0;
+                            xfrac[x] = 0;
+                        } else {
+                            int sx = num / den;
+                            int rem = num % den;
+                            if (sx >= w - 1) {
+                                sx = w - 1;
+                                rem = 0;
+                            }
+                            xbase[x] = (uint16_t)sx;
+                            xfrac[x] = (uint8_t)((rem * 32 + den / 2) / den);
+                        }
+                    }
+                    map_w = w;
+                    map_tw = tw;
+                }
                 uint16_t *dst = buf[bi]; bi ^= 1;
                 const uint16_t *s = (const uint16_t *)src;
                 int sp = pitch / 2;
+                int bilinear = scale_filter == SCALE_FILTER_BILINEAR;
                 for (int y = 0; y < h; y++) {
                     const uint16_t *sr = s + (size_t)y * sp;
                     uint16_t *dr = dst + (size_t)y * tw;
-                    for (int x = 0; x < tw; x++) dr[x] = sr[x * w / tw];
+                    if (!bilinear) {
+                        for (int x = 0; x < tw; x++) dr[x] = sr[xmap[x]];
+                    } else {
+                        for (int x = 0; x < tw; x++) {
+                            unsigned a = xfrac[x], ia = 32u - a;
+                            unsigned sx = xbase[x];
+                            uint16_t p = sr[sx], q = sr[sx + (sx + 1u < (unsigned)w)];
+                            unsigned rb = (((p & 0xf81fu) * ia +
+                                            (q & 0xf81fu) * a) >> 5) & 0xf81fu;
+                            unsigned g  = (((p & 0x07e0u) * ia +
+                                            (q & 0x07e0u) * a) >> 5) & 0x07e0u;
+                            dr[x] = (uint16_t)(rb | g);
+                        }
+                    }
                 }
                 src = dst; w = tw; pitch = tw * 2;
             }
         }
     }
 
+present:
     if (!(sf3000_is_r36sx() && hwdisp_present_direct(src, w, h, pitch)))
         hwdisp_present(src, w, h, pitch);
 }
