@@ -435,9 +435,142 @@ static int menu_loop_cheats(int id, int keys)
 	return ret;
 }
 
+#define CORE_OPTION_LABEL_CHARS 23
+#define CORE_OPTION_VALUE_CHARS 10
+
+/* Format a field for the narrow two-column emulator-options view. Short text
+ * stays still, unselected overflow gets an ellipsis, and selected overflow
+ * loops after a brief pause so every character can be read. */
+static void core_option_field(char *dst, size_t dst_size, const char *src,
+	int selected, unsigned int elapsed_ms)
+{
+	size_t visible;
+	size_t len = src ? strlen(src) : 0;
+
+	if (!dst_size)
+		return;
+	visible = dst_size - 1;
+	if (len <= visible) {
+		snprintf(dst, dst_size, "%s", src ? src : "");
+		return;
+	}
+
+	if (!selected) {
+		size_t keep = visible > 3 ? visible - 3 : 0;
+		memcpy(dst, src, keep);
+		memcpy(dst + keep, "...", visible - keep);
+		dst[visible] = '\0';
+		return;
+	}
+
+	/* Show the beginning for 900ms, then move one character every 140ms.
+	 * Three spaces make the wrap point clear. */
+	size_t pos = elapsed_ms < 900 ? 0 : 1 + (elapsed_ms - 900) / 140;
+	size_t cycle = len + 3;
+	for (size_t i = 0; i < visible; i++) {
+		size_t at = (pos + i) % cycle;
+		dst[i] = at < len ? src[at] : ' ';
+	}
+	dst[visible] = '\0';
+}
+
+static void core_options_draw(menu_entry *menu,
+	struct core_option_entry **page_entries, size_t page_count, int sel,
+	unsigned int selected_since, char names[][CORE_OPTION_LABEL_CHARS + 1],
+	char values[][CORE_OPTION_VALUE_CHARS + 1])
+{
+	char *saved_values[MENU_ITEMS_PER_PAGE] = {0};
+	unsigned int elapsed = plat_get_ticks_ms() - selected_since;
+
+	for (size_t row = 0; row < page_count; row++) {
+		struct core_option_entry *entry = page_entries[row];
+		int selected = (int)row == sel;
+		core_option_field(names[row], sizeof(names[row]), entry->desc, selected, elapsed);
+		menu[row].name = names[row];
+
+		/* me_draw reads the selected label from this array. Replace just that
+		 * pointer for the draw, then restore it before processing input. */
+		if (entry->labels && entry->labels[entry->value]) {
+			saved_values[row] = entry->labels[entry->value];
+			core_option_field(values[row], sizeof(values[row]), saved_values[row],
+				selected, elapsed);
+			entry->labels[entry->value] = values[row];
+		}
+	}
+
+	me_draw(menu, sel, NULL);
+
+	for (size_t row = 0; row < page_count; row++) {
+		struct core_option_entry *entry = page_entries[row];
+		if (saved_values[row])
+			entry->labels[entry->value] = saved_values[row];
+	}
+}
+
+static int core_options_loop(menu_entry *menu,
+	struct core_option_entry **page_entries, size_t page_count, int *menu_sel)
+{
+	int ret = 0, inp, sel = *menu_sel;
+	int sel_max = me_count(menu) - 1;
+	int previous_sel;
+	unsigned int selected_since = plat_get_ticks_ms();
+	char names[MENU_ITEMS_PER_PAGE][CORE_OPTION_LABEL_CHARS + 1];
+	char values[MENU_ITEMS_PER_PAGE][CORE_OPTION_VALUE_CHARS + 1];
+
+	if (sel_max < 0)
+		return 0;
+	if (sel > sel_max)
+		sel = sel_max;
+	while ((!menu[sel].enabled || !menu[sel].selectable) && sel < sel_max)
+		sel++;
+	previous_sel = sel;
+
+	core_options_draw(menu, page_entries, page_count, sel, selected_since, names, values);
+	while (in_menu_wait_any(NULL, 50) & (PBTN_MOK | PBTN_MBACK | PBTN_MENU))
+		;
+
+	for (;;) {
+		if (sel != previous_sel) {
+			previous_sel = sel;
+			selected_since = plat_get_ticks_ms();
+		}
+		core_options_draw(menu, page_entries, page_count, sel, selected_since, names, values);
+		inp = in_menu_wait(PBTN_UP | PBTN_DOWN | PBTN_LEFT | PBTN_RIGHT |
+			PBTN_MOK | PBTN_MBACK | PBTN_MENU | PBTN_L | PBTN_R, NULL, 70);
+		if (inp & (PBTN_MENU | PBTN_MBACK))
+			break;
+		if (inp & PBTN_UP) {
+			do { sel--; if (sel < 0) sel = sel_max; }
+			while (!menu[sel].enabled || !menu[sel].selectable);
+		}
+		if (inp & PBTN_DOWN) {
+			do { sel++; if (sel > sel_max) sel = 0; }
+			while (!menu[sel].enabled || !menu[sel].selectable);
+		}
+		if (inp & (PBTN_LEFT | PBTN_RIGHT | PBTN_L | PBTN_R)) {
+			if (me_process(&menu[sel], (inp & (PBTN_RIGHT | PBTN_R)) != 0,
+				inp & (PBTN_L | PBTN_R)))
+				continue;
+		}
+		if (inp & (PBTN_MOK | PBTN_LEFT | PBTN_RIGHT | PBTN_L | PBTN_R)) {
+			if (menu[sel].handler &&
+				(menu[sel].beh != MB_NONE || (inp & PBTN_MOK))) {
+				ret = menu[sel].handler(menu[sel].id, inp);
+				if (ret)
+					break;
+				sel_max = me_count(menu) - 1;
+			}
+		}
+	}
+
+	*menu_sel = sel;
+	return ret;
+}
+
 static int menu_loop_core_options_page(int offset, int keys) {
 	static int sel = 0;
 	menu_entry *e_menu_core_options;
+	struct core_option_entry *page_entries[MENU_ITEMS_PER_PAGE] = {0};
 	size_t i, menu_idx;
 
 	/* core_option + 2 for possible "Next page" +  NULL */
@@ -466,6 +599,7 @@ static int menu_loop_core_options_page(int offset, int keys) {
 		option->selectable = 1;
 		option->data = options_get_options(key);
 		option->help = entry->info;
+		page_entries[menu_idx] = entry;
 		menu_idx++;
 	}
 
@@ -480,7 +614,7 @@ static int menu_loop_core_options_page(int offset, int keys) {
 		option->handler = menu_loop_core_options_page;
 	}
 
-	me_loop(e_menu_core_options, &sel);
+	core_options_loop(e_menu_core_options, page_entries, menu_idx, &sel);
 
 	options_update_changed();
 

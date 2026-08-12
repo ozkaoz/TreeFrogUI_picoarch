@@ -25,7 +25,6 @@ int optimize_text;
 
 struct core_options core_options;
 
-#define MAX_DESC_LEN 20
 #define MAX_LINE_LEN 52
 #define MAX_LINES 3
 
@@ -104,7 +103,6 @@ void options_init(const struct retro_core_option_definition *defs) {
 		}
 
 		strncpy(entry->desc, desc, len);
-		string_truncate(entry->desc, MAX_DESC_LEN);
 
 		if (info) {
 			len = strlen(info) + 1;
@@ -245,7 +243,6 @@ void options_init_variables(const struct retro_variable *vars) {
 		if (p && *(p + 1) == ' ') {
 			*p = '\0';
 			entry->desc = value;
-			string_truncate(entry->desc, MAX_DESC_LEN);
 			p++;
 			p++;
 		}
