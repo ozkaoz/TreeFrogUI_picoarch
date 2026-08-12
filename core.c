@@ -820,6 +820,12 @@ int core_load_content(struct content *content) {
 		 * bound (controls dead + console spam on button press). */
 		current_core.retro_set_controller_port_device(0, RETRO_DEVICE_JOYPAD);
 	}
+	if (!strncmp(core_name, "vice_", 5) && current_core.retro_set_controller_port_device) {
+		/* VICE initializes all ports to RETRO_DEVICE_NONE and relies on the
+		 * frontend to plug one in. Without this, it deliberately skips both
+		 * joystick input and RetroPad hotkeys such as the virtual keyboard. */
+		current_core.retro_set_controller_port_device(0, RETRO_DEVICE_JOYPAD);
+	}
 
 	DBG("DBG M5e: get_system_av_info\n");
 	current_core.retro_get_system_av_info(&av_info);
