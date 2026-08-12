@@ -1140,6 +1140,7 @@ int quit(int code) {
 	/* Read launch.txt first to know the next process. */
 	int next_is_standalone = 0;
 	int next_is_video_player = 0;
+	int next_is_image_viewer = 0;
 	char core_path[512] = "", rom_path[512] = "", standalone_rom[512] = "";
 	FILE *lf = fopen(LAUNCH_FILE, "r");
 	if (lf) {
@@ -1151,6 +1152,8 @@ int quit(int code) {
 		next_is_standalone = (strcmp(core_path, "standalone") == 0 && rom_path[0]);
 		next_is_video_player = next_is_standalone &&
 			strstr(rom_path, "/video_player") != NULL;
+		next_is_image_viewer = next_is_standalone &&
+			strstr(rom_path, "/image_viewer") != NULL;
 	}
 
 	DBG("DBG quit: use_hwdisp=%d next_standalone=%d core_path[0]=%d rom_path[0]=%d\n",
@@ -1171,10 +1174,10 @@ int quit(int code) {
 		if (m) { fprintf(m, "%d", (int)getppid()); fclose(m); }
 	}
 	/* Most legacy standalone apps expect the warm HCGE state. libffplayer is
-	 * different: it owns the hardware video plane itself, and blocks forever
-	 * if picoarch leaves driver.so/HCGE active across exec. Release HCGE only
-	 * for our native video player; preserve the proven PS1/DOS/Rockbox path. */
-	if (!next_is_standalone || next_is_video_player) {
+	 * different: it owns the hardware media plane itself, and blocks forever
+	 * if picoarch leaves driver.so/HCGE active across exec. Release HCGE for
+	 * our native video and image viewers; preserve the PS1/DOS/Rockbox path. */
+	if (!next_is_standalone || next_is_video_player || next_is_image_viewer) {
 		hwdisp_deinit();
 		DBG("DBG quit: hwdisp_deinit done\n");
 	}
