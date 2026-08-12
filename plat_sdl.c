@@ -2230,12 +2230,21 @@ if (sf3000_use_hwdisp) {
             if ((++ff_ctr) % div) ff_skip = 1;
         }
         int aspect = !game_frame || (scale_size != SCALE_SIZE_FULL);
-        /* The driver expands its submitted source envelope to the 16:9 panel.
-         * Native therefore keeps the core frame untouched but pads it into a
-         * panel-aspect envelope. Forced modes reshape the small frame first,
-         * then use that same envelope. Fill deliberately submits no envelope. */
-        hwdisp_set_target_aspect(aspect ? PANEL_ASPECT_NUM : 0,
-                                 aspect ? PANEL_ASPECT_DEN : 0);
+        /* Native portrait/vector frames must retain the core's envelope.
+         * Padding VecX 330x410 to the SF panel's 16:9 envelope produces
+         * 728x410, beyond disp_frame's 640px source-width limit: the driver
+         * rejects every frame and leaves a black screen. Forced modes have
+         * already reshaped the small frame; menus still use the panel aspect. */
+        if (game_frame && scale_size == SCALE_SIZE_ASPECT &&
+            !sf3000_aspect_forced()) {
+            double ar = (aspect_ratio > 0.1) ? aspect_ratio : (4.0 / 3.0);
+            int native_num = (int)(ar * 1000.0 + 0.5);
+            if (native_num < 1) native_num = 1;
+            hwdisp_set_target_aspect(native_num, 1000);
+        } else {
+            hwdisp_set_target_aspect(aspect ? PANEL_ASPECT_NUM : 0,
+                                     aspect ? PANEL_ASPECT_DEN : 0);
+        }
         /* Filter routing. The SW Nearest/Sharp paths are R36SX-only (present_direct
          * + panel_build); SF-class presents through the driver's disp_frame HW
          * scaler, where the SW-nearest upscale mis-sizes the frame - so SF-class
