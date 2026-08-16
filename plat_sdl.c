@@ -1033,6 +1033,38 @@ static struct audio_frame sf3000_rs_prev;       /* previous input frame */
 
 static volatile int sf3000_audio_init_rc = 0;   /* 0=pending, 1=ok, -1=failed */
 
+/* AUDDEC/I2SO can survive a process transition in a half-alive state: init
+ * reports success, but no samples reach the speaker until another application
+ * (notably pcsx4all) opens and closes the driver. Keep every operation on the
+ * audio thread because SF3500-class drivers store their handle thread-locally.
+ * A clean cycle reproduces the known PSX recovery automatically at startup. */
+static int sf3000_audio_driver_start(int clean_cycle)
+{
+	if (!sf3000_sound_driver_init)
+		return 0;
+
+	for (int pass = 0; pass < (clean_cycle ? 2 : 1); pass++) {
+		int rc = -1;
+		for (int try = 0; try < 20; try++) {
+			rc = sf3000_sound_driver_init(NULL, SAMPLE_RATE, 2);
+			if (rc >= 0)
+				break;
+			usleep(100 * 1000);
+		}
+		if (rc < 0)
+			return -1;
+
+		if (pass == 0 && clean_cycle) {
+			dbg_log("DBG A: clean AUDDEC/I2SO startup cycle\n");
+			if (sf3000_sound_driver_deinit)
+				sf3000_sound_driver_deinit();
+			/* The firmware audio daemon releases the devices asynchronously. */
+			usleep(100 * 1000);
+		}
+	}
+	return 0;
+}
+
 static void *sf3000_audio_thread_fn(void *unused)
 {
 	(void)unused;
@@ -1040,6 +1072,7 @@ static void *sf3000_audio_thread_fn(void *unused)
 	uint64_t next_us = 0;
 	int primed = 0;
 	int short_polls = 0;
+	int driver_active = 0;
 
 	/* Init the DAC ON THIS THREAD. The SF3500/HD/SF3100 driver keeps its audio
 	 * handle thread-local, so sound_driver_init() and sound_driver_playframe()
@@ -1050,22 +1083,14 @@ static void *sf3000_audio_thread_fn(void *unused)
 	 * RETRY on failure: at menu→game transitions the previous process's
 	 * deinit settles asynchronously in the audio daemon; a first-try init can
 	 * fail and giving up left the whole system silent until reboot. */
-	if (sf3000_sound_driver_init) {
-		int rc = -1;
-		for (int try = 0; try < 20; try++) {
-			rc = sf3000_sound_driver_init(NULL, SAMPLE_RATE, 2);
-			if (rc >= 0)
-				break;
-			usleep(100 * 1000);   /* 100ms; up to 2s total */
-		}
-		if (rc < 0) {
-			PA_ERROR("SF3000: sound_driver_init failed on audio thread (all retries)\n");
-			dbg_log("DBG A: sound_driver_init FAILED after retries\n");
-			sf3000_audio_init_rc = -1;
-			sf3000_audio_running = 0;
-			return NULL;
-		}
+	if (sf3000_audio_driver_start(1) < 0) {
+		PA_ERROR("SF3000: sound_driver_init failed on audio thread (all retries)\n");
+		dbg_log("DBG A: sound_driver_init FAILED after clean-cycle retries\n");
+		sf3000_audio_init_rc = -1;
+		sf3000_audio_running = 0;
+		return NULL;
 	}
+	driver_active = 1;
 	sf3000_audio_init_rc = 1;
 
 	while (sf3000_audio_running) {
@@ -1115,8 +1140,32 @@ static void *sf3000_audio_thread_fn(void *unused)
 		/* Some stock driver variants return immediately while others block.
 		 * Clock the non-blocking case at exactly chunk/48000 seconds; if the
 		 * call already blocked, the deadline has passed and no sleep is added. */
-		if (sf3000_sound_driver_playframe)
-			sf3000_sound_driver_playframe(chunk, SF3000_ACHUNK);
+		int play_rc = sf3000_sound_driver_playframe
+			? sf3000_sound_driver_playframe(chunk, SF3000_ACHUNK) : -1;
+		if (play_rc < 0) {
+			/* A failed write means the firmware lost AUDDEC/I2SO ownership.
+			 * Reopen it here, on its owner thread, then refill from a clean ring. */
+			dbg_log("DBG A: playframe failed rc=%d; recovering audio driver\n", play_rc);
+			if (sf3000_sound_driver_deinit)
+				sf3000_sound_driver_deinit();
+			driver_active = 0;
+			usleep(100 * 1000);
+			if (sf3000_audio_driver_start(0) < 0) {
+				dbg_log("DBG A: runtime audio recovery FAILED\n");
+				sf3000_audio_init_rc = -1;
+				sf3000_audio_running = 0;
+				break;
+			}
+			driver_active = 1;
+			pthread_mutex_lock(&sf3000_aring_mtx);
+			sf3000_aring_r = sf3000_aring_w;
+			pthread_mutex_unlock(&sf3000_aring_mtx);
+			primed = 0;
+			short_polls = 0;
+			next_us = 0;
+			dbg_log("DBG A: runtime audio recovery OK\n");
+			continue;
+		}
 		{
 			struct timespec ts;
 			clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -1134,7 +1183,7 @@ static void *sf3000_audio_thread_fn(void *unused)
 		}
 	}
 	/* Deinit on the same thread that init'd + played (thread-local handle). */
-	if (sf3000_sound_driver_deinit)
+	if (driver_active && sf3000_sound_driver_deinit)
 		sf3000_sound_driver_deinit();
 	return NULL;
 }
@@ -2049,8 +2098,7 @@ static void sf3000_hw_present_frame(const void *src, int w, int h, int pitch,
         if (tw > 0 && tw <= 1280 && h > 0 && h <= 720) {
             static uint16_t *buf[2];
             static int cap, bi;
-            static uint16_t xmap[1280], xbase[1280];
-            static uint8_t xfrac[1280];
+            static uint16_t xmap[1280];
             static int map_w = -1, map_tw = -1;
             int need = tw * h;
             if (need > cap) {
@@ -2067,24 +2115,6 @@ static void sf3000_hw_present_frame(const void *src, int w, int h, int pitch,
                     for (int x = 0; x < tw; x++) {
                         xmap[x] = (uint16_t)((unsigned)x * (unsigned)w /
                                             (unsigned)tw);
-                        /* Pixel-centred source coordinate for Bilinear. Keep a
-                         * compact 5-bit weight so the frame loop needs only
-                         * packed RGB565 multiplies, never division. */
-                        int den = tw * 2;
-                        int num = (x * 2 + 1) * w - tw;
-                        if (num <= 0) {
-                            xbase[x] = 0;
-                            xfrac[x] = 0;
-                        } else {
-                            int sx = num / den;
-                            int rem = num % den;
-                            if (sx >= w - 1) {
-                                sx = w - 1;
-                                rem = 0;
-                            }
-                            xbase[x] = (uint16_t)sx;
-                            xfrac[x] = (uint8_t)((rem * 32 + den / 2) / den);
-                        }
                     }
                     map_w = w;
                     map_tw = tw;
@@ -2092,24 +2122,16 @@ static void sf3000_hw_present_frame(const void *src, int w, int h, int pitch,
                 uint16_t *dst = buf[bi]; bi ^= 1;
                 const uint16_t *s = (const uint16_t *)src;
                 int sp = pitch / 2;
-                int bilinear = scale_filter == SCALE_FILTER_BILINEAR;
+                /* Only reshape the small source geometry here. The hardware
+                 * scaler performs the final filtered enlargement, so a second
+                 * CPU bilinear pass is visually redundant and costs four MIPS
+                 * multiplies per output pixel. Nearest mapping retains the
+                 * exact requested aspect while leaving enough CPU for cores
+                 * such as QuickNES and SNES9x 2005. */
                 for (int y = 0; y < h; y++) {
                     const uint16_t *sr = s + (size_t)y * sp;
                     uint16_t *dr = dst + (size_t)y * tw;
-                    if (!bilinear) {
-                        for (int x = 0; x < tw; x++) dr[x] = sr[xmap[x]];
-                    } else {
-                        for (int x = 0; x < tw; x++) {
-                            unsigned a = xfrac[x], ia = 32u - a;
-                            unsigned sx = xbase[x];
-                            uint16_t p = sr[sx], q = sr[sx + (sx + 1u < (unsigned)w)];
-                            unsigned rb = (((p & 0xf81fu) * ia +
-                                            (q & 0xf81fu) * a) >> 5) & 0xf81fu;
-                            unsigned g  = (((p & 0x07e0u) * ia +
-                                            (q & 0x07e0u) * a) >> 5) & 0x07e0u;
-                            dr[x] = (uint16_t)(rb | g);
-                        }
-                    }
+                    for (int x = 0; x < tw; x++) dr[x] = sr[xmap[x]];
                 }
                 src = dst; w = tw; pitch = tw * 2;
             }

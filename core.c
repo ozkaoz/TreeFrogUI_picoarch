@@ -623,6 +623,7 @@ static void pa_input_poll(void) {
 		static int menu_armed = 1;
 		static int ss_armed = 1;   /* save/load-state latch */
 		static int sel_off_cnt = 0;
+		static int suppress_menu_buttons = 0;
 		if (g_is_frogui) {
 			prev_raw = raw;
 			buttons = actions[IN_BINDTYPE_PLAYER12];
@@ -632,6 +633,11 @@ static void pa_input_poll(void) {
 			menu_armed = 0;
 			sel_off_cnt = 0;
 			handle_emu_action(EACTION_MENU);
+			/* PCE maps START to Run and soft-resets on Run+Select. The input
+			 * snapshot above predates the blocking menu loop, so forwarding it on
+			 * the return frame resets the core after changing an option. Suppress
+			 * both libretro buttons until the physical combo is fully released. */
+			suppress_menu_buttons = 1;
 		}
 		/* Save/load state are LATCHED like the menu: fire once, then refuse until
 		 * SELECT is fully released. The two-writer input race flickers L2/R2 while
@@ -663,6 +669,12 @@ static void pa_input_poll(void) {
 		 * persist in the config. Hotkeys above stay on raw physical bits so
 		 * SELECT+START always opens the menu regardless of remapping. */
 		buttons = actions[IN_BINDTYPE_PLAYER12];
+		if (suppress_menu_buttons) {
+			buttons &= ~((1u << RETRO_DEVICE_ID_JOYPAD_SELECT) |
+			             (1u << RETRO_DEVICE_ID_JOYPAD_START));
+			if (!(raw & (SEL_BIT | START_BIT)))
+				suppress_menu_buttons = 0;
+		}
 frogui_no_hotkeys: ;
 	} else {
 		buttons = actions[IN_BINDTYPE_PLAYER12];
