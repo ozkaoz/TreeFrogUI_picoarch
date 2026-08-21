@@ -537,6 +537,7 @@ static void rewind_apply(void);   /* defined below; applies rewind toggle live *
  * Accumulate seconds per game into /mnt/sdcard/frogui/playtime.txt as
  * "<seconds>\t<content path>" lines; FrogUI reads it to show play time. */
 #define PLAYTIME_FILE "/mnt/sdcard/frogui/playtime.txt"
+#define PLAYSESSION_FILE "/mnt/sdcard/frogui/play_sessions.txt"
 static long playtime_mono(void) {
 	struct timespec t;
 	clock_gettime(CLOCK_MONOTONIC, &t);
@@ -566,6 +567,17 @@ static void playtime_add(const char *path, long add) {
 		fflush(f); fsync(fileno(f)); fclose(f);
 	}
 	free(paths); free(secs);
+}
+
+/* Keep an append-only session ledger as well as the compact all-time totals.
+ * Older cards only have playtime.txt; FrogUI falls back to that file. */
+static void play_session_add(const char *path, long seconds) {
+	if (!path || !*path || seconds <= 0) return;
+	FILE *f = fopen(PLAYSESSION_FILE, "a");
+	if (!f) return;
+	time_t now = time(NULL);
+	fprintf(f, "%ld\t%ld\t%s\n", (long)now, seconds, path);
+	fflush(f); fsync(fileno(f)); fclose(f);
 }
 
 void handle_emu_action(emu_action action)
@@ -1098,8 +1110,11 @@ int main(int argc, char **argv) {
 #endif
 	} while (!should_quit);
 
-	if (!g_is_frogui)   /* don't count time spent in the menu */
-		playtime_add(content_path, playtime_mono() - play_start);
+	if (!g_is_frogui) {  /* don't count time spent in the menu */
+		long played = playtime_mono() - play_start;
+		playtime_add(content_path, played);
+		play_session_add(content_path, played);
+	}
 	/* Screenshot for recents/switcher art is updated on menu-enter (one route),
 	 * not here: at exit the framebuffer is already torn down (black). */
 
