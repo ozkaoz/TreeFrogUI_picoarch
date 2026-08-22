@@ -591,6 +591,7 @@ void handle_emu_action(emu_action action)
 		break;
 	case EACTION_MENU:
 	{
+		plat_sound_pause_for_menu();
 #ifdef PLATFORM_SF3000
 		extern int sf3000_use_hwdisp;
 		DBG("DBG EACTION_MENU: use_hwdisp=%d filter=%d\n",
@@ -654,6 +655,7 @@ void handle_emu_action(emu_action action)
 		}
 #endif
 		rewind_apply();   /* apply rewind on/off toggled in the menu, no restart */
+		plat_sound_resume_from_menu();
 		break;
 	case EACTION_TOGGLE_HUD:
 		show_hud = !show_hud;

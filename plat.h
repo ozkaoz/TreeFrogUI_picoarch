@@ -48,6 +48,8 @@ unsigned plat_cpu_ticks(void);
 float plat_sound_capacity(void);
 void plat_sound_write(const struct audio_frame *data, int frames);
 void plat_sound_resize_buffer(void);
+void plat_sound_pause_for_menu(void);
+void plat_sound_resume_from_menu(void);
 
 void* plat_clean_screen(void);
 

@@ -1028,6 +1028,8 @@ static unsigned           sf3000_aring_r = 0;   /* consumer: audio thread */
 static pthread_mutex_t    sf3000_aring_mtx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t          sf3000_audio_thread;
 static volatile int       sf3000_audio_running = 0;
+static volatile int       sf3000_audio_menu_paused = 0;
+static volatile int       sf3000_audio_resume_immediate = 0;
 static uint32_t           sf3000_rs_phase = 0;  /* linear-resample phase, 16.16 */
 static struct audio_frame sf3000_rs_prev;       /* previous input frame */
 
@@ -1100,9 +1102,22 @@ static void *sf3000_audio_thread_fn(void *unused)
 
 	while (sf3000_audio_running) {
 		int have_chunk = 0;
+		if (sf3000_audio_menu_paused) {
+			pthread_mutex_lock(&sf3000_aring_mtx);
+			sf3000_aring_r = sf3000_aring_w;
+			pthread_mutex_unlock(&sf3000_aring_mtx);
+			primed = 0;
+			next_us = 0;
+			usleep(2000);
+			continue;
+		}
 
 		pthread_mutex_lock(&sf3000_aring_mtx);
 		unsigned avail = sf3000_aring_w - sf3000_aring_r;  /* free-running */
+		if (sf3000_audio_resume_immediate) {
+			primed = 1;
+			sf3000_audio_resume_immediate = 0;
+		}
 		/* Libretro cores submit audio in one-video-frame bursts. Buffer 30ms
 		 * before starting, then feed the non-blocking stock driver at a steady
 		 * 48kHz instead of inheriting that burst cadence. A scaled frame can be
@@ -1427,6 +1442,24 @@ void plat_sound_resize_buffer(void) {
 	audio.buf_r = 0;
 	audio.max_buf_w = audio.buf_len - 1;
 	SDL_UnlockAudio();
+#endif
+}
+
+void plat_sound_pause_for_menu(void)
+{
+#ifdef PLATFORM_SF3000
+	sf3000_audio_menu_paused = 1;
+	pthread_mutex_lock(&sf3000_aring_mtx);
+	sf3000_aring_r = sf3000_aring_w;
+	pthread_mutex_unlock(&sf3000_aring_mtx);
+#endif
+}
+
+void plat_sound_resume_from_menu(void)
+{
+#ifdef PLATFORM_SF3000
+	sf3000_audio_resume_immediate = 1;
+	sf3000_audio_menu_paused = 0;
 #endif
 }
 
