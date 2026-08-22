@@ -1083,13 +1083,18 @@ static void *sf3000_audio_thread_fn(void *unused)
 	 * RETRY on failure: at menu→game transitions the previous process's
 	 * deinit settles asynchronously in the audio daemon; a first-try init can
 	 * fail and giving up left the whole system silent until reboot. */
-	if (sf3000_audio_driver_start(1) < 0) {
-		PA_ERROR("SF3000: sound_driver_init failed on audio thread (all retries)\n");
-		dbg_log("DBG A: sound_driver_init FAILED after clean-cycle retries\n");
+	/* A previous core can leave AUDDEC/I2SO busy for considerably longer than
+	 * the normal 100 ms settle window. Keep the consumer alive and retry rather
+	 * than permanently silencing the session; this is the same recovery users
+	 * previously triggered by launching and exiting PCSX4ALL. */
+	while (sf3000_audio_running && sf3000_audio_driver_start(1) < 0) {
+		PA_ERROR("SF3000: sound_driver_init failed; retrying audio startup\n");
+		dbg_log("DBG A: sound_driver_init failed; retry in 250ms\n");
 		sf3000_audio_init_rc = -1;
-		sf3000_audio_running = 0;
-		return NULL;
+		usleep(250 * 1000);
 	}
+	if (!sf3000_audio_running)
+		return NULL;
 	driver_active = 1;
 	sf3000_audio_init_rc = 1;
 
@@ -1150,12 +1155,13 @@ static void *sf3000_audio_thread_fn(void *unused)
 				sf3000_sound_driver_deinit();
 			driver_active = 0;
 			usleep(100 * 1000);
-			if (sf3000_audio_driver_start(0) < 0) {
-				dbg_log("DBG A: runtime audio recovery FAILED\n");
+			while (sf3000_audio_running && sf3000_audio_driver_start(0) < 0) {
+				dbg_log("DBG A: runtime audio recovery failed; retry in 250ms\n");
 				sf3000_audio_init_rc = -1;
-				sf3000_audio_running = 0;
-				break;
+				usleep(250 * 1000);
 			}
+			if (!sf3000_audio_running)
+				break;
 			driver_active = 1;
 			pthread_mutex_lock(&sf3000_aring_mtx);
 			sf3000_aring_r = sf3000_aring_w;
@@ -2081,6 +2087,16 @@ static int sf3000_aspect_forced(void) {
  * driver still performs the expensive enlargement to the panel in hardware. */
 static void sf3000_hw_present_frame(const void *src, int w, int h, int pitch,
                                     int game_frame) {
+    /* Forced ratios are especially visible on low-resolution pixel art: the
+     * driver's bilinear pass can make adjacent NES pixels land at different
+     * widths. Use the existing nearest path for small game frames in this
+     * mode, while leaving the user's filter choice unchanged for native/full
+     * presentation and for larger cores. */
+    int forced_nearest = game_frame && sf3000_aspect_forced() &&
+                         scale_filter == SCALE_FILTER_BILINEAR &&
+                         w <= 400 && h <= 300;
+    if (forced_nearest)
+        hwdisp_set_filter(SCALE_FILTER_NEAREST);
     if (game_frame && scale_size == SCALE_SIZE_NONE && !sf3000_is_r36sx()) {
         hwdisp_present_integer(src, w, h, pitch);
         return;
@@ -2141,6 +2157,8 @@ static void sf3000_hw_present_frame(const void *src, int w, int h, int pitch,
 present:
     if (!(sf3000_is_r36sx() && hwdisp_present_direct(src, w, h, pitch)))
         hwdisp_present(src, w, h, pitch);
+    if (forced_nearest)
+        hwdisp_set_filter(scale_filter);
 }
 /* Screenshot: dump the current RGB565 frame to a top-down 24bpp BMP. */
 static void sf3000_screenshot(const void *src, int w, int h, int pitch) {
