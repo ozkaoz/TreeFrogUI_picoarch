@@ -2087,22 +2087,17 @@ static int sf3000_aspect_forced(void) {
  * driver still performs the expensive enlargement to the panel in hardware. */
 static void sf3000_hw_present_frame(const void *src, int w, int h, int pitch,
                                     int game_frame) {
-    /* Forced ratios are especially visible on low-resolution pixel art: the
-     * driver's bilinear pass can make adjacent NES pixels land at different
-     * widths. Use the existing nearest path for small game frames in this
-     * mode, while leaving the user's filter choice unchanged for native/full
-     * presentation and for larger cores. */
-    int forced_nearest = game_frame && sf3000_aspect_forced() &&
-                         scale_filter == SCALE_FILTER_BILINEAR &&
-                         w <= 400 && h <= 300;
-    if (forced_nearest)
-        hwdisp_set_filter(SCALE_FILTER_NEAREST);
     if (game_frame && scale_size == SCALE_SIZE_NONE && !sf3000_is_r36sx()) {
         hwdisp_present_integer(src, w, h, pitch);
         return;
     }
 
-    if (game_frame && scale_size == SCALE_SIZE_ASPECT && sf3000_aspect_forced()) {
+    /* Bilinear custom-aspect frames go straight to the hardware scaler. The
+     * old path first copied every pixel into a reshaped buffer, then scaled it
+     * again, which wasted CPU and could starve audio on NES/SNES. Keep the
+     * source-reshape path only for an explicitly selected nearest filter. */
+    if (game_frame && scale_size == SCALE_SIZE_ASPECT && sf3000_aspect_forced() &&
+        scale_filter != SCALE_FILTER_BILINEAR) {
         int m = (aspect_ratio_mode >= 0 && aspect_ratio_mode < ASPECT_N) ? aspect_ratio_mode : 1;
         const struct aspect_def *d = &aspect_defs[m];
         int tw = (h * d->num + d->den / 2) / d->den;
@@ -2157,8 +2152,6 @@ static void sf3000_hw_present_frame(const void *src, int w, int h, int pitch,
 present:
     if (!(sf3000_is_r36sx() && hwdisp_present_direct(src, w, h, pitch)))
         hwdisp_present(src, w, h, pitch);
-    if (forced_nearest)
-        hwdisp_set_filter(scale_filter);
 }
 /* Screenshot: dump the current RGB565 frame to a top-down 24bpp BMP. */
 static void sf3000_screenshot(const void *src, int w, int h, int pitch) {
