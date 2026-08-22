@@ -2399,7 +2399,16 @@ if (sf3000_use_hwdisp) {
          * rejects every frame and leaves a black screen. Forced modes have
          * already reshaped the small frame; menus still use the panel aspect. */
         if (game_frame && scale_size == SCALE_SIZE_ASPECT &&
-            !sf3000_aspect_forced()) {
+            sf3000_aspect_forced()) {
+            /* Forced ratios must reach the driver's aspect-pad stage.  The
+             * old code always passed the physical panel ratio here (16:9 on
+             * SF3000), so a requested 4:3/5:4/etc. was silently padded as the
+             * panel ratio and appeared to snap back toward the core's small
+             * native envelope (notably 8:7 NES output). */
+            int m = (aspect_ratio_mode >= 0 && aspect_ratio_mode < ASPECT_N) ? aspect_ratio_mode : 1;
+            hwdisp_set_target_aspect(aspect_defs[m].num, aspect_defs[m].den);
+        } else if (game_frame && scale_size == SCALE_SIZE_ASPECT &&
+                   !sf3000_aspect_forced()) {
             double ar = (aspect_ratio > 0.1) ? aspect_ratio : (4.0 / 3.0);
             int native_num = (int)(ar * 1000.0 + 0.5);
             if (native_num < 1) native_num = 1;
