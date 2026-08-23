@@ -52,7 +52,8 @@ static fn_disp_t   p_disp   = NULL;
  * fullscreen fill (the GE stretches src→panel ignoring aspect), arg 0 =
  * aspect-fit (letterbox). This is how stock does distort-to-fill in pure HW. */
 static fn_aspect_t p_aspect = NULL;
-static int         g_fs_state = -1;   /* last value pushed, avoid redundant calls */
+static int         g_fs_state = -1;   /* last fill/aspect value pushed */
+static int         g_fs_num = -1, g_fs_den = -1; /* last ratio programmed */
 
 /* Display-controller enhance/sharpness probe (exported fbdev_set_enhance):
  * 5 params, first four 0-100, fifth 0-10 (a mode-like selector). Sweep them
@@ -195,6 +196,7 @@ int hwdisp_init(void) {
     p_aspect = (fn_aspect_t)dlsym(g_handle, "fbdev_video_aspect_ratio");
     p_enhance = (fn_enhance_t)dlsym(g_handle, "fbdev_set_enhance");
     g_fs_state = -1;
+    g_fs_num = g_fs_den = -1;
 
     if (!p_init || !p_deinit || !p_disp) {
         fprintf(stderr, "hwdisp: dlsym failed (init=%p deinit=%p disp=%p)\n",
@@ -721,9 +723,11 @@ void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {
      * could remain stuck in Native/Fill after switching to Integer or back. */
     if (p_aspect) {
         int want = (g_aspect_num > 0 && g_aspect_den > 0) ? 1 : 0;
-        if (want != g_fs_state) {
+        if (want != g_fs_state || g_aspect_num != g_fs_num || g_aspect_den != g_fs_den) {
             p_aspect(want);
             g_fs_state = want;
+            g_fs_num = g_aspect_num;
+            g_fs_den = g_aspect_den;
             DBG("DBG scaler mode: target=%d/%d p_aspect(%d)\n",
                 g_aspect_num, g_aspect_den, want);
         }
@@ -844,9 +848,11 @@ void hwdisp_present_integer(const void *src, int w, int h, int pitch_bytes) {
 
     /* SF-class semantics: 1 = aspect-fit. The exact viewport is centered by
      * the hardware scaler, preserving its integer dimensions on the panel. */
-    if (p_aspect && g_fs_state != 1) {
+    if (p_aspect && (g_fs_state != 1 || g_fs_num != g_aspect_num || g_fs_den != g_aspect_den)) {
         p_aspect(1);
         g_fs_state = 1;
+        g_fs_num = g_aspect_num;
+        g_fs_den = g_aspect_den;
     }
     p_disp(dst, env_w, env_h, env_w * 2);
 }
@@ -875,5 +881,7 @@ void hwdisp_deinit(void) {
     if (g_handle) { dlclose(g_handle); g_handle = NULL; }
     p_init = NULL; p_deinit = NULL; p_disp = NULL;
     g_active = 0;
+    g_fs_state = -1;
+    g_fs_num = g_fs_den = -1;
     sf3000_dump_fb_state("hwdisp_deinit/post-dlclose");
 }
