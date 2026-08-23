@@ -2565,7 +2565,12 @@ if (sf3000_use_hwdisp) {
     int disp_h = PHYS_H;
     
     if (current_scale == SCALE_SIZE_ASPECT) {
-        double ar = (aspect_ratio > 0.1) ? aspect_ratio : (double)gw / gh;
+        /* Use the unified frontend selection here too.  The SF3000 software
+         * transpose path used to read only the core-reported aspect_ratio,
+         * which silently turned a requested 3:2/4:3 mode back into the NES
+         * core's native envelope. */
+        double ar = sf3000_content_aspect();
+        if (ar <= 0.1) ar = (double)gw / gh;
         disp_w = (int)(PHYS_H * ar + 0.5);
     } else if (current_scale == SCALE_SIZE_NONE) {
         /* Integer scaling */
