@@ -728,7 +728,6 @@ static menu_entry e_menu_video_options[] =
 	mee_enum_h       ("Aspect ratio",  MA_VID_ASPECT, aspect_ratio_mode, men_aspect_ratio, h_aspect_ratio),
 	mee_enum_h       ("Filter",        MA_VID_FILTER, scale_filter, men_scale_filter, h_scale_filter),
 	// mee_range_h      ("Max upscale",              0, max_upscale, 1, 8, h_max_upscale),
-	mee_enum_h       ("Screen effect",    MA_VID_FX, scale_effect, men_scale_effect, h_scale_effect),
 	mee_handler_id_h (             "", MA_VID_BLANK, NULL, NULL),
 	mee_onoff_h      ("Optimize text",            0, optimize_text, 1, h_optimize_text),
 	mee_range_h      ("Audio buffer",             0, audio_buffer_size, 1, 15, h_audio_buffer_size),

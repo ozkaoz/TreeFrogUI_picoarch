@@ -19,7 +19,8 @@ enum scale_filter scale_filter;
 int sf3000_sharpness;   /* HW edge-sharpen 0-10 (fbdev_set_enhance p4) */
 int aspect_ratio_mode;  /* 0=Auto (core-reported), 1=4:3, 2=16:9 */
 enum scale_effect scale_effect;
-enum scale_effect default_scale_effect = SCALE_EFFECT_SCANLINE;
+/* CRT/LCD/scanline effects are intentionally not exposed or used. */
+enum scale_effect default_scale_effect = SCALE_EFFECT_NONE;
 int optimize_text;
 // int max_upscale;
 
