@@ -722,7 +722,9 @@ void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {
      * previously only the R36SX direct path called p_aspect(), so SF3000
      * could remain stuck in Native/Fill after switching to Integer or back. */
     if (p_aspect) {
-        int want = (g_aspect_num > 0 && g_aspect_den > 0) ? 1 : 0;
+        /* Firmware reports is_full_screen:1 after p_aspect(1), so the
+         * driver's argument is not an aspect-fit flag: 0=fit, 1=fill. */
+        int want = (g_aspect_num > 0 && g_aspect_den > 0) ? 0 : 1;
         if (want != g_fs_state || g_aspect_num != g_fs_num || g_aspect_den != g_fs_den) {
             p_aspect(want);
             g_fs_state = want;
@@ -848,9 +850,9 @@ void hwdisp_present_integer(const void *src, int w, int h, int pitch_bytes) {
 
     /* SF-class semantics: 1 = aspect-fit. The exact viewport is centered by
      * the hardware scaler, preserving its integer dimensions on the panel. */
-    if (p_aspect && (g_fs_state != 1 || g_fs_num != g_aspect_num || g_fs_den != g_aspect_den)) {
-        p_aspect(1);
-        g_fs_state = 1;
+    if (p_aspect && (g_fs_state != 0 || g_fs_num != g_aspect_num || g_fs_den != g_aspect_den)) {
+        p_aspect(0);
+        g_fs_state = 0;
         g_fs_num = g_aspect_num;
         g_fs_den = g_aspect_den;
     }
