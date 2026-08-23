@@ -828,7 +828,8 @@ void hwdisp_present_integer(const void *src, int w, int h, int pitch_bytes) {
     int nx = PANEL_W / w, ny = PANEL_H / h;
     int n = nx < ny ? nx : ny;
     if (n < 1) n = 1;
-    int env_w = w * n, env_h = h * n;
+    int env_w = w * n, active_h = h * n, env_h = PANEL_H;
+    if (active_h > env_h) active_h = env_h;
     static uint16_t *ib[2]; static int ibi;
     if (!ib[0]) ib[0] = (uint16_t *)malloc(PANEL_W * PANEL_H * 2);
     if (!ib[1]) ib[1] = (uint16_t *)malloc(PANEL_W * PANEL_H * 2);
@@ -837,16 +838,23 @@ void hwdisp_present_integer(const void *src, int w, int h, int pitch_bytes) {
     memset(dst, 0, (size_t)env_w * env_h * 2);
     const uint16_t *s = (const uint16_t *)src;
     int sp = pitch_bytes / 2;
+    int yoff = (env_h - active_h) / 2;
     for (int y = 0; y < h; y++) {
         const uint16_t *sr = s + (size_t)y * sp;
         for (int ry = 0; ry < n; ry++) {
-            uint16_t *dr = dst + (size_t)(y * n + ry) * env_w;
+            int dy = yoff + y * n + ry;
+            if (dy >= env_h) continue;
+            uint16_t *dr = dst + (size_t)dy * env_w;
             for (int x = 0; x < w; x++)
                 for (int rx = 0; rx < n; rx++) dr[x * n + rx] = sr[x];
         }
     }
-    DBG("DBG integer HW: src=%dx%d n=%d viewport=%dx%d panel=%dx%d\n",
-        w, h, n, env_w, env_h, PANEL_W, PANEL_H);
+    /* Make the driver's aspect-fit target match the actual integer canvas,
+     * not the global 16:9 panel mode left by the menu. */
+    g_aspect_num = env_w;
+    g_aspect_den = env_h;
+    DBG("DBG integer HW: src=%dx%d n=%d active=%dx%d viewport=%dx%d panel=%dx%d\n",
+        w, h, n, env_w, active_h, env_w, env_h, PANEL_W, PANEL_H);
 
     /* SF-class semantics: 1 = aspect-fit. The exact viewport is centered by
      * the hardware scaler, preserving its integer dimensions on the panel. */
