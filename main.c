@@ -148,12 +148,14 @@ static void clear_last_game(void) {
 void dbg_log(const char *fmt, ...) {
 	/* Write directly to log.txt (append) so every picoarch process — including
 	 * the game process exec'd from FrogUI — is captured, regardless of whether
-	 * its stderr is redirected. Gated on log.txt existing (debug mode). */
+	 * its stderr is redirected.  The file is created automatically on the
+	 * diagnostic builds; a missing marker must not silently discard the evidence
+	 * needed for display-mode debugging. */
 	static int enabled = -1;
 	static FILE *lf = NULL;
 	if (enabled == -1) {
-		enabled = (access("/mnt/sdcard/log.txt", F_OK) == 0) ? 1 : 0;
-		if (enabled) lf = fopen("/mnt/sdcard/log.txt", "a");
+		enabled = 1;
+		lf = fopen("/mnt/sdcard/log.txt", "a");
 	}
 	if (!enabled || !lf) return;
 	va_list ap;

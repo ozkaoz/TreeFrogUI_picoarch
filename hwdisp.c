@@ -715,6 +715,19 @@ void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {
                 g_filter_nearest, g_aspect_num, g_aspect_den, HW_W, HW_H);
     if (!g_active || !src) { if (lg) DBG("DBG present#%d: EARLY-RET\n", s_n); return; }
     if (!p_disp) { if (lg) DBG("DBG present#%d: no p_disp\n", s_n); return; }
+    /* SF-class presents use this path (not present_direct).  Keep the
+     * driver's fill/aspect state synchronized with every menu transition;
+     * previously only the R36SX direct path called p_aspect(), so SF3000
+     * could remain stuck in Native/Fill after switching to Integer or back. */
+    if (p_aspect) {
+        int want = (g_aspect_num > 0 && g_aspect_den > 0) ? 1 : 0;
+        if (want != g_fs_state) {
+            p_aspect(want);
+            g_fs_state = want;
+            DBG("DBG scaler mode: target=%d/%d p_aspect(%d)\n",
+                g_aspect_num, g_aspect_den, want);
+        }
+    }
     int rv;
     /* Nearest filter: SW upscale to 1280×720, driver does no further scale. */
     if (g_filter_nearest) {
