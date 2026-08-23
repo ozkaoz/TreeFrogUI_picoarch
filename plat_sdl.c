@@ -2417,6 +2417,21 @@ if (sf3000_use_hwdisp) {
             hwdisp_set_target_aspect(aspect ? PANEL_ASPECT_NUM : 0,
                                      aspect ? PANEL_ASPECT_DEN : 0);
         }
+        {
+            extern void dbg_log(const char *fmt, ...);
+            static int last_log_w = -1, last_log_h = -1, last_log_mode = -1;
+            static int last_log_aspect = -1, last_log_filter = -1;
+            if (width != last_log_w || height != last_log_h ||
+                scale_size != last_log_mode || aspect_ratio_mode != last_log_aspect ||
+                scale_filter != last_log_filter) {
+                dbg_log("DBG HW geometry: src=%dx%d game=%d scale=%d aspect_mode=%d forced=%d core_ar=%.4f filter=%d\n",
+                        width, height, game_frame, (int)scale_size,
+                        aspect_ratio_mode, sf3000_aspect_forced(), aspect_ratio,
+                        scale_filter);
+                last_log_w = width; last_log_h = height; last_log_mode = scale_size;
+                last_log_aspect = aspect_ratio_mode; last_log_filter = scale_filter;
+            }
+        }
         /* Filter routing. The SW Nearest/Sharp paths are R36SX-only (present_direct
          * + panel_build); SF-class presents through the driver's disp_frame HW
          * scaler, where the SW-nearest upscale mis-sizes the frame - so SF-class

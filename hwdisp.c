@@ -801,13 +801,36 @@ void hwdisp_present_integer(const void *src, int w, int h, int pitch_bytes) {
     if (!g_active || !p_disp || !src) return;
     if (w <= 0 || h <= 0) return;
 
-    int env_w, env_h;
-    uint16_t *dst = integer_envelope_build(src, w, h, pitch_bytes,
-                                           PANEL_W, PANEL_H, &env_w, &env_h);
-    if (!dst) return;
+    /* SF-class integer viewport: build the exact NxN result, then ask HCGE to
+     * aspect-fit that viewport into the 854x480 panel.  The old panel/N
+     * envelope (e.g. 428x240 for a 256x240 NES frame) made HCGE fill the full
+     * panel, which is why Integer looked horizontally squeezed instead of
+     * producing the expected 512x480 image. */
+    int nx = PANEL_W / w, ny = PANEL_H / h;
+    int n = nx < ny ? nx : ny;
+    if (n < 1) n = 1;
+    int env_w = w * n, env_h = h * n;
+    static uint16_t *ib[2]; static int ibi;
+    if (!ib[0]) ib[0] = (uint16_t *)malloc(PANEL_W * PANEL_H * 2);
+    if (!ib[1]) ib[1] = (uint16_t *)malloc(PANEL_W * PANEL_H * 2);
+    if (!ib[0] || !ib[1]) return;
+    uint16_t *dst = ib[ibi]; ibi ^= 1;
+    memset(dst, 0, (size_t)env_w * env_h * 2);
+    const uint16_t *s = (const uint16_t *)src;
+    int sp = pitch_bytes / 2;
+    for (int y = 0; y < h; y++) {
+        const uint16_t *sr = s + (size_t)y * sp;
+        for (int ry = 0; ry < n; ry++) {
+            uint16_t *dr = dst + (size_t)(y * n + ry) * env_w;
+            for (int x = 0; x < w; x++)
+                for (int rx = 0; rx < n; rx++) dr[x * n + rx] = sr[x];
+        }
+    }
+    DBG("DBG integer HW: src=%dx%d n=%d viewport=%dx%d panel=%dx%d\n",
+        w, h, n, env_w, env_h, PANEL_W, PANEL_H);
 
-    /* SF-class semantics: 1 = non-uniform fill. The envelope is deliberately
-     * panel/N, so fill lets HCGE provide the missing integer enlargement. */
+    /* SF-class semantics: 1 = aspect-fit. The exact viewport is centered by
+     * the hardware scaler, preserving its integer dimensions on the panel. */
     if (p_aspect && g_fs_state != 1) {
         p_aspect(1);
         g_fs_state = 1;
