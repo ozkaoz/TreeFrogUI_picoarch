@@ -101,7 +101,9 @@ struct sf3000_btn { uint8_t bit; uint8_t retro_id; };
    UP=0x0010(4) DN=0x0040(6) LT=0x0080(7) RT=0x0020(5)
    A=0x2000(13) B=0x4000(14) X=0x1000(12) Y=0x8000(15)
    L=0x0400(10) R=0x0800(11) L2=0x0100(8) R2=0x0200(9)
-   SEL=0x0001(0) STA=0x0008(3) */
+   SEL=0x0001(0) STA=0x0008(3)
+   L3=0x0002(1) R3=0x0004(2) — bits 1,2 are L3/R3 per Stock rkgame, not FN.
+   FN=0x00010000(16) per Stock rkgame disassembly (Witali/r36sx_disasm) and verified SHA 57d8... on user's SD. */
 struct sf3000_btn sf3000_keymap[] = {
     { 4,  RETRO_DEVICE_ID_JOYPAD_UP     },
     { 6,  RETRO_DEVICE_ID_JOYPAD_DOWN   },
@@ -119,6 +121,26 @@ struct sf3000_btn sf3000_keymap[] = {
     { 3,  RETRO_DEVICE_ID_JOYPAD_START  },
 };
 const int sf3000_keymap_count = (int)(sizeof(sf3000_keymap)/sizeof(sf3000_keymap[0]));
+
+/* ===== FN BUTTON (PHYSICAL) — Feature C1 — R36SX V2.6 CONFIRMED =====
+ * FN is a PHYSICAL input, NOT a libretro virtual action.
+ * Must NOT create RETRO_DEVICE_ID_JOYPAD_FN.
+ * Model: PHYSICAL_FN (SDLK_F11) → binding → existing virtual action (SELECT/START/L3/etc)
+ * Default binding = UNBOUND (no entry in in_sdl_defbinds).
+ * Raw cubevol bit for FN is CONFIRMED: bit 16 (0x00010000) per Stock firmware evidence:
+ *   - G:\cubegm\setting.xml: <quicksavehotkey>FN+A</quicksavehotkey>, <quickloadhotkey>FN+B</quickloadhotkey>, <quicksnaphotkey>FN+START</quicksnaphotkey> (SHA d7e8..., identical to backup)
+ *   - G:\cubegm\rkgame SHA 57d8b4fd85e0aab44d17a51d209879c3f98130d066b622142736b42ad08ddcb9 matches Witali/r36sx_disasm disk_image rkgame; disassembly shows joykey_explaned FN 0x00010000 (bit 16), L3 0x00000002 (bit1), R3 0x00000004 (bit2)
+ *   - Public wiki https://github.com/LiamJ74/R36S-V2.6_Wiki documents FN+A=quicksave, FN+B=quickload
+ *   - Device tree /panel/key-fn = 0x00000002 in same repo is for L3, not FN — Stock rkgame mapping at 0x00010000 is authoritative for /tmp/joy_key
+ * Confidence: HIGH for R36SX V2.6 (direct Stock firmware/config/disassembly + matching SHA). Other devices remain UNKNOWN.
+ * Device capability: sf3000_has_fn auto-enabled for R36SX via TF_DEVICE detection (see plat_sdl.c), no user file required.
+ * Visible name in UI: "FN".
+ */
+#define SF3000_FN_BIT 16
+#define SF3000_FN_SDLKEY SDLK_F11
+/* HAS_FN capability: runtime flag, auto-enabled for R36SX V2.6 via TF_DEVICE=R36SX (see sf3000_fn_capability_init), otherwise env/file override.
+   R36SX V2.6 YES (HIGH), other 7 devices UNKNOWN/NO until evidence. */
+extern int sf3000_has_fn;
 
 uint32_t sf3000_keys_to_buttons(uint32_t raw) {
     uint32_t result = 0;
@@ -190,6 +212,7 @@ static const char * const in_sdl_key_names[SDLK_LAST] = {
     [SDLK_RCTRL]      = "SELECT",
     [SDLK_TAB]        = "L",
     [SDLK_BACKSPACE]  = "R",
+    [SDLK_F11]        = "FN",
     [SDLK_1]          = "MENU+UP",
     [SDLK_2]          = "MENU+DOWN",
     [SDLK_3]          = "MENU+LEFT",
