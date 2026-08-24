@@ -13,6 +13,7 @@ int  hwdisp_init(void);
 
 /* True if HW path is active (init succeeded). */
 int  hwdisp_active(void);
+int  hwdisp_native_game_surface(void);
 
 /* Set target output aspect for padding (default 0,0 = no pad, full stretch).
  * Driver scales source dims to panel; setting target aspect causes

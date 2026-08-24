@@ -673,6 +673,7 @@ static const char h_optimize_text[]        =
 static const char *men_scale_size[] = { "Integer", "Aspect", "Full", NULL};
 static const char *men_aspect_ratio[] = {
 	"Integer", "Native", "4:3", "16:9", "3:2", "5:4", "8:7", "16:10", "Fill", NULL };
+static const char *men_aspect_ratio_sf[] = { "Integer", "Native", "Fill", NULL };
 static const char h_aspect_ratio[] =
 	"Integer: exact pixel multiples (sharpest).\n"
 	"Native: the ratio the core reports. Then forced ratios,\n"
@@ -740,18 +741,25 @@ static menu_entry e_menu_video_options[] =
 
 	// only show effects on native scale
 static void menu_loop_video_prep(void) {
-	/* Integer (NONE) works on the HW present regardless of filter — no reset. */
-	/* Filter is owned by FrogUI settings — hide from in-game menu. */
+	#ifdef PLATFORM_SF3000
+	/* SF3000/SF3500 drivers expose only Native/Fit and Fill. Keep the full
+	 * custom-ratio list available on R36SX, whose display path supports it. */
+	if (!sf3000_is_r36sx()) {
+		if (aspect_ratio_mode == 8) aspect_ratio_mode = 2; /* Fill -> compact index */
+		e_menu_video_options[4].data = men_aspect_ratio_sf;
+	} else {
+		e_menu_video_options[4].data = men_aspect_ratio;
+	}
+	#endif
+	/* Filter is owned by FrogUI settings. The old scale-size/effects entries are
+	 * intentionally removed from this menu; do not call me_enable() for their
+	 * IDs, since me_id2offset() falls back to entry 0 and disables Show FPS. */
 	me_enable(e_menu_video_options, MA_VID_FILTER, true);
 	/* Sharpness is a HW post-process for the hardware scale (Bilinear + Sharp);
 	 * true Nearest is already sharp (and SW), so hide it there. */
 	me_enable(e_menu_video_options, MA_VID_SHARPNESS,
 	          scale_filter != SCALE_FILTER_NEAREST);
-	/* Screen size always visible; effects only meaningful in nearest. */
-	me_enable(e_menu_video_options, MA_VID_SCALE_SIZE, true);
-	me_enable(e_menu_video_options, MA_VID_FX,
-	          scale_filter == SCALE_FILTER_NEAREST && scale_size == SCALE_SIZE_NONE);
-	me_enable(e_menu_video_options, MA_VID_BLANK, scale_size!=SCALE_SIZE_NONE);
+	/* Screen-size/effects entries are no longer present in this compact menu. */
 }
 
 static int menu_loop_video_options(int id, int keys)
@@ -760,6 +768,9 @@ static int menu_loop_video_options(int id, int keys)
 	menu_loop_video_prep();
 
 	me_loop_d(e_menu_video_options, &sel, menu_loop_video_prep, NULL);
+	#ifdef PLATFORM_SF3000
+	if (!sf3000_is_r36sx() && aspect_ratio_mode == 2) aspect_ratio_mode = 8;
+	#endif
 	scale_update_scaler();
 
 #ifdef PLATFORM_SF3000

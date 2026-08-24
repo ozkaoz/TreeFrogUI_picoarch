@@ -2120,15 +2120,18 @@ static int sf3000_aspect_forced(void) {
  * driver still performs the expensive enlargement to the panel in hardware. */
 static void sf3000_hw_present_frame(const void *src, int w, int h, int pitch,
                                     int game_frame) {
-    if (game_frame && scale_size == SCALE_SIZE_NONE && !sf3000_is_r36sx()) {
+    /* R36SX's direct path has its own hardware integer handling. SF3000 must
+     * never enter the CPU integer-envelope builder: submit the core frame
+     * unchanged and let HCGE scale it. */
+    if (game_frame && scale_size == SCALE_SIZE_NONE && sf3000_is_r36sx()) {
         hwdisp_present_integer(src, w, h, pitch);
         return;
     }
 
-    /* Bilinear custom-aspect frames go straight to the hardware scaler. The
-     * old path first copied every pixel into a reshaped buffer, then scaled it
-     * again, which wasted CPU and could starve audio on NES/SNES. Keep the
-     * source-reshape path only for an explicitly selected nearest filter. */
+    /* Custom ratio source reshaping is deliberately disabled on SF3000: all
+     * per-frame CPU scaling is forbidden on this chipset. Arbitrary ratios
+     * must eventually be implemented through a driver/HCGE crop or viewport
+     * control, not by modifying the core frame. */
     if (game_frame && scale_size == SCALE_SIZE_ASPECT && sf3000_aspect_forced() &&
         scale_filter != SCALE_FILTER_BILINEAR) {
         int m = (aspect_ratio_mode >= 0 && aspect_ratio_mode < ASPECT_N) ? aspect_ratio_mode : 1;
@@ -2167,11 +2170,7 @@ static void sf3000_hw_present_frame(const void *src, int w, int h, int pitch,
                 const uint16_t *s = (const uint16_t *)src;
                 int sp = pitch / 2;
                 /* Only reshape the small source geometry here. The hardware
-                 * scaler performs the final filtered enlargement, so a second
-                 * CPU bilinear pass is visually redundant and costs four MIPS
-                 * multiplies per output pixel. Nearest mapping retains the
-                 * exact requested aspect while leaving enough CPU for cores
-                 * such as QuickNES and SNES9x 2005. */
+                 * scaler performs the final filtered enlargement. */
                 for (int y = 0; y < h; y++) {
                     const uint16_t *sr = s + (size_t)y * sp;
                     uint16_t *dr = dst + (size_t)y * tw;
@@ -2228,15 +2227,10 @@ static void sf3000_screenshot(const void *src, int w, int h, int pitch) {
 
 void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
     sf3000_apply_aspect();   /* merged Aspect-ratio control drives scale_size */
-    /* The driver's disp_frame only accepts stock-sized game frames (<=640x480 —
-     * it prints "Frame is too large than screen size" and draws nothing for
-     * anything bigger, e.g. Game & Watch artwork at 653x392 or 606x748) plus
-     * exactly panel-size frames (FrogUI's path, proven on every boot). So any
-     * frame over 640x480 that isn't already panel-size gets composed into a
-     * full panel-size canvas. Use the selected display aspect here: oversized
-     * cores such as Cap32 render a wide pixel buffer but report the intended
-     * display aspect separately. Baking the raw buffer ratio into this canvas
-     * made Native too wide and made every aspect-menu choice look identical. */
+    /* Oversized frames use a panel canvas. Normal game frames go directly
+     * through the HCGE driver; SF3000's small-frame surface is patched to the
+     * native 854x480 geometry during hwdisp_init, so no full-panel software
+     * scaling is performed here. */
     /* STICKY: once one frame composes, compose every later frame too. Cores
      * that zoom (G&W Multi Screen alternates full view 606x748 <-> zoomed
      * 343x193) otherwise flap the frame size, and each size change makes the
@@ -2332,11 +2326,9 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
      * proven safe with panel-native input.  Cold-boot FrogUI takes SW path
      * (no marker → use_hwdisp=0). */
     /* R36SX ONLY: panel-size core frames (FrogUI) → direct fb0 write (controller
-     * scales, panel is landscape-native so no rotation needed). SF3000's panel is
-     * portrait-mounted (needs 90° rotation) and its driver's disp_frame ABORTS on
-     * panel-size frames (only small game frames work), so SF3000 FrogUI falls
-     * through to the SW transpose path below (bilinear-blended, its proven cold
-     * renderer). */
+     * scales, panel is landscape-native so no rotation needed). SF3000 composed
+     * game frames and FrogUI use the driver's verified panel-size path; its
+     * 270-degree rotation is handled inside driver.so. */
     if (sf3000_is_r36sx() && src != screen->pixels &&
         width == PANEL_W && height == PANEL_H) {
         if (!sf3000_use_hwdisp && hwdisp_init() == 0) {
@@ -2352,10 +2344,8 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
      * handles panel-size frames cleanly — proven by rkgame's own FrogUI render).
      * The SW transpose path is SF3000-geometry-tuned → squish + page-flip churn
      * on SF3500, so route everything (incl. nearest/menu frames) through HW. */
-    /* SF3000 menu stays on the SW transpose path: its driver's disp_frame ABORTS
-     * on panel-size (854x480) frames (pthread mutex assertion → SIGABRT), only
-     * small game frames present cleanly. So HW is for R36SX (fb-write), SF3500
-     * (its driver handles panel frames), and bilinear game frames. */
+    /* SF3000 panel-size frames are now safe: FrogUI already exercises this path
+     * on every boot, and composed game frames use the same source geometry. */
     sf3000_detect_device();
     if (!sf3000_use_hwdisp && !sf3000_force_sw() &&
         (sf3000_is_r36sx() || sf3000_is_sf3500() ||
@@ -2424,10 +2414,10 @@ if (sf3000_use_hwdisp) {
             if (width != last_log_w || height != last_log_h ||
                 scale_size != last_log_mode || aspect_ratio_mode != last_log_aspect ||
                 scale_filter != last_log_filter) {
-                dbg_log("DBG HW geometry: src=%dx%d game=%d scale=%d aspect_mode=%d forced=%d core_ar=%.4f filter=%d\n",
+                dbg_log("DBG HW geometry: src=%dx%d game=%d scale=%d aspect_mode=%d forced=%d core_ar=%.4f requested_filter=%d effective_filter=%s\n",
                         width, height, game_frame, (int)scale_size,
                         aspect_ratio_mode, sf3000_aspect_forced(), aspect_ratio,
-                        scale_filter);
+                        scale_filter, sf3000_is_r36sx() ? "selected" : "hw-bilinear");
                 last_log_w = width; last_log_h = height; last_log_mode = scale_size;
                 last_log_aspect = aspect_ratio_mode; last_log_filter = scale_filter;
             }

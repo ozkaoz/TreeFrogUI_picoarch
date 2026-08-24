@@ -38,6 +38,7 @@ extern void dbg_log(const char *fmt, ...);
 
 static void   *g_handle = NULL;
 static int     g_active = 0;
+static int     g_native_game_surface = 0;
 
 typedef int  (*fn_init_t)(void);
 typedef void (*fn_deinit_t)(void);
@@ -48,9 +49,19 @@ typedef void (*fn_enhance_t)(int p0, int p1, int p2, int p3, int p4);
 static fn_init_t   p_init   = NULL;
 static fn_deinit_t p_deinit = NULL;
 static fn_disp_t   p_disp   = NULL;
-/* Driver's fullscreen toggle (exported fbdev_video_aspect_ratio): arg 1 =
- * fullscreen fill (the GE stretches src→panel ignoring aspect), arg 0 =
- * aspect-fit (letterbox). This is how stock does distort-to-fill in pure HW. */
+/* SF3000 driver exports g_render: a pointer to the live fb render context.
+ * fbdev_video_aspect_ratio() updates only its global default; fb_paint_task
+ * reads the copied fullscreen bit at context+16. */
+static void       **p_g_render = NULL;
+/* Driver's misleadingly named aspect toggle (fbdev_video_aspect_ratio).
+ * Reverse engineering the SF3000 driver (driver sha256 90727162..., function
+ * 0x5ba4) shows that it stores `argument == 0` into ge_is_full_screen:
+ *
+ *     argument 0 -> stored fullscreen 1 -> stretch/fill
+ *     argument 1 -> stored fullscreen 0 -> preserve source aspect / fit
+ *
+ * Its "is_full_screen:%d" printf logs the ARGUMENT, not the stored value. Do
+ * not infer the internal state from that driver message. */
 static fn_aspect_t p_aspect = NULL;
 static int         g_fs_state = -1;   /* last fill/aspect value pushed */
 static int         g_fs_num = -1, g_fs_den = -1; /* last ratio programmed */
@@ -62,6 +73,53 @@ static int         g_fs_num = -1, g_fs_den = -1; /* last ratio programmed */
  * sharpens the GE's bilinear scale toward nearest. */
 static fn_enhance_t p_enhance = NULL;
 static int          g_sharpen = -1;   /* last sharpness pushed (0-10); -1 = unset */
+
+/* SF3000's stock generic game branch hardcodes a 640x480 virtual surface.
+ * Change only that immediate on the known 854x480 driver so HCGE scales core
+ * frames directly on the native panel surface. */
+static void hwdisp_patch_sf3000_game_surface(void) {
+    extern int sf3000_is_r36sx(void), sf3000_is_sf3500(void);
+    extern int sf3000_panel_w(void), sf3000_panel_h(void);
+    if (sf3000_is_r36sx() || sf3000_is_sf3500() || sf3000_panel_w() != 854 || sf3000_panel_h() != 480 || !p_disp) return;
+    volatile uint32_t *ins = (volatile uint32_t *)((unsigned char *)p_disp + 0x9c);
+    if (*ins != 0x24020280u) { DBG("DBG sf3000 driver patch: signature mismatch old=0x%08x\n", *ins); return; }
+    long ps = sysconf(_SC_PAGESIZE); if (ps <= 0) ps = 4096;
+    uintptr_t page = (uintptr_t)ins & ~((uintptr_t)ps - 1);
+    if (mprotect((void *)page, (size_t)ps, PROT_READ|PROT_WRITE|PROT_EXEC) != 0) return;
+    *ins = 0x24020356u;
+    __builtin___clear_cache((char *)ins, (char *)ins + sizeof(*ins));
+    mprotect((void *)page, (size_t)ps, PROT_READ|PROT_EXEC);
+    g_native_game_surface = 1;
+    DBG("DBG sf3000 driver patch: generic game surface 640 -> 854 (HCGE)\n");
+}
+
+int hwdisp_native_game_surface(void) { return g_native_game_surface; }
+
+static void hwdisp_set_driver_fit(int fit, int force_log) {
+    if (!p_aspect) return;
+    /* The API argument is the inverse of the driver's stored fullscreen bit. */
+    int arg = fit ? 1 : 0;
+    if (arg == g_fs_state && !force_log) return;
+    p_aspect(arg);
+    g_fs_state = arg;
+    int live_old = -1, live_new = -1;
+    if (p_g_render && *p_g_render) {
+        /* This is the driver's real context layout (verified against
+         * driver_sf3000.so fbdev_init/fb_paint_task). The render thread only
+         * consumes this copied field, not the global changed above. */
+        /* fbdev_video_aspect_ratio() stores the live render flag at
+         * context+0x32b0 (12976), as verified from driver_sf3000.so:
+         *   sw v1,12976(v0), where v0 is g_render. */
+        volatile unsigned int *live_fullscreen =
+            (volatile unsigned int *)((unsigned char *)*p_g_render + 0x32b0);
+        live_old = (int)*live_fullscreen;
+        *live_fullscreen = (unsigned int)!arg;
+        live_new = (int)*live_fullscreen;
+    }
+    DBG("DBG driver aspect: api_arg=%d global_fullscreen=%d live_ctx=%p live_fullscreen=%d->%d mode=%s\n",
+        arg, !arg, p_g_render ? (void *)(p_g_render ? *p_g_render : NULL) : NULL,
+        live_old, live_new, fit ? "aspect-fit" : "stretch-fill");
+}
 
 /* Edge-sharpen level 0-10 (p4 of fbdev_set_enhance; colours left neutral at 50).
  * Whole-panel DIS post-process — the closest the HW gets to "nearest" (edge
@@ -193,18 +251,21 @@ int hwdisp_init(void) {
     p_init   = (fn_init_t)  dlsym(g_handle, "video_drivers_init");
     p_deinit = (fn_deinit_t)dlsym(g_handle, "video_driver_deinit");
     p_disp   = (fn_disp_t)  dlsym(g_handle, "video_driver_disp_frame");
+    p_g_render = (void **)dlsym(g_handle, "g_render");
     p_aspect = (fn_aspect_t)dlsym(g_handle, "fbdev_video_aspect_ratio");
     p_enhance = (fn_enhance_t)dlsym(g_handle, "fbdev_set_enhance");
+    g_native_game_surface = 0;
     g_fs_state = -1;
     g_fs_num = g_fs_den = -1;
 
     if (!p_init || !p_deinit || !p_disp) {
-        fprintf(stderr, "hwdisp: dlsym failed (init=%p deinit=%p disp=%p)\n",
-                p_init, p_deinit, p_disp);
+        fprintf(stderr, "hwdisp: dlsym failed (init=%p deinit=%p disp=%p g_render=%p)\n",
+                p_init, p_deinit, p_disp, p_g_render);
         dlclose(g_handle); g_handle = NULL;
         return -1;
     }
 
+    hwdisp_patch_sf3000_game_surface();
     int rv = p_init();
     if (rv <= 0) {
         fprintf(stderr, "hwdisp: video_drivers_init returned %d\n", rv);
@@ -213,7 +274,8 @@ int hwdisp_init(void) {
     }
 
     g_active = 1;
-    fprintf(stderr, "hwdisp: HW path active (init rv=%d)\n", rv);
+    fprintf(stderr, "hwdisp: HW path active (init rv=%d g_render=%p ctx=%p)\n",
+            rv, (void *)p_g_render, p_g_render ? *p_g_render : NULL);
 
     /* R36SX: enable the HCGE engine via video_driver_setmode so disp_frame's
      * engine-sync doesn't hang (rkgame configures before presenting). disp_frame
@@ -685,9 +747,8 @@ int hwdisp_present_direct(const void *src, int w, int h, int pitch_bytes) {
     }
 
     if (p_aspect && hw_scale) {
-        /* Driver arg is inverted on this build: 0 = fill, 1 = aspect-fit. */
-        int want = integer_hw ? 0 : ((g_panel_scale == 2) ? 0 : 1);
-        if (want != g_fs_state) { p_aspect(want); g_fs_state = want; }
+        int fit = integer_hw ? 0 : (g_panel_scale != 2);
+        hwdisp_set_driver_fit(fit, 0);
     }
     /* disp_frame DMA-reads src asynchronously; handing it the caller's live
      * buffer races the next frame's rendering (font/pixel shimmer during menu
@@ -722,16 +783,14 @@ void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {
      * previously only the R36SX direct path called p_aspect(), so SF3000
      * could remain stuck in Native/Fill after switching to Integer or back. */
     if (p_aspect) {
-        /* Firmware reports is_full_screen:1 after p_aspect(1), so the
-         * driver's argument is not an aspect-fit flag: 0=fit, 1=fill. */
-        int want = (g_aspect_num > 0 && g_aspect_den > 0) ? 0 : 1;
-        if (want != g_fs_state || g_aspect_num != g_fs_num || g_aspect_den != g_fs_den) {
-            p_aspect(want);
-            g_fs_state = want;
+        int fit = (g_aspect_num > 0 && g_aspect_den > 0);
+        int arg = fit ? 1 : 0;
+        if (arg != g_fs_state || g_aspect_num != g_fs_num || g_aspect_den != g_fs_den) {
+            hwdisp_set_driver_fit(fit, 1);
             g_fs_num = g_aspect_num;
             g_fs_den = g_aspect_den;
-            DBG("DBG scaler mode: target=%d/%d p_aspect(%d)\n",
-                g_aspect_num, g_aspect_den, want);
+            DBG("DBG scaler mode: target=%d/%d api_arg=%d stored_fullscreen=%d\n",
+                g_aspect_num, g_aspect_den, arg, !arg);
         }
     }
     int rv;
@@ -856,11 +915,10 @@ void hwdisp_present_integer(const void *src, int w, int h, int pitch_bytes) {
     DBG("DBG integer HW: src=%dx%d n=%d active=%dx%d viewport=%dx%d panel=%dx%d\n",
         w, h, n, env_w, active_h, env_w, env_h, PANEL_W, PANEL_H);
 
-    /* SF-class semantics: 1 = aspect-fit. The exact viewport is centered by
-     * the hardware scaler, preserving its integer dimensions on the panel. */
-    if (p_aspect && (g_fs_state != 0 || g_fs_num != g_aspect_num || g_fs_den != g_aspect_den)) {
-        p_aspect(0);
-        g_fs_state = 0;
+    /* API arg 1 stores ge_is_full_screen=0. The exact 512x480 NES canvas is
+     * therefore centered without being stretched to the 854px panel width. */
+    if (p_aspect && (g_fs_state != 1 || g_fs_num != g_aspect_num || g_fs_den != g_aspect_den)) {
+        hwdisp_set_driver_fit(1, 1);
         g_fs_num = g_aspect_num;
         g_fs_den = g_aspect_den;
     }
@@ -890,7 +948,9 @@ void hwdisp_deinit(void) {
     g_int_src_h[0] = g_int_src_h[1] = 0;
     if (g_handle) { dlclose(g_handle); g_handle = NULL; }
     p_init = NULL; p_deinit = NULL; p_disp = NULL;
+    p_g_render = NULL;
     g_active = 0;
+    g_native_game_surface = 0;
     g_fs_state = -1;
     g_fs_num = g_fs_den = -1;
     sf3000_dump_fb_state("hwdisp_deinit/post-dlclose");
