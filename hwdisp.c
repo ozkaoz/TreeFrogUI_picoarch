@@ -98,7 +98,8 @@ struct sf3000_setting_raw {
  * SF3000 driver calls hcge_set_state through its MIPS GOT.  Swapping that GOT
  * entry lets us observe the real rectangle after fb_paint_task builds it,
  * without changing the driver text or its render-thread ABI.  Geometry writes
- * are separately gated by hcge_state_hook_apply.flag. */
+ * Geometry is applied directly for SF-class hardware; this is the active
+ * experimental path now that the software fallback has been removed. */
 static void sf3000_hcge_set_state_hook(void *ctx, void *state, unsigned int accel)
 {
     volatile uint32_t *s = (volatile uint32_t *)state;
@@ -108,10 +109,9 @@ static void sf3000_hcge_set_state_hook(void *ctx, void *state, unsigned int acce
             n, ctx, state, accel, s[0xb0/4], s[0xb4/4], s[0xb8/4],
             s[0xbc/4], s[0xc8/4]);
 
-    /* Never alter state during ordinary diagnostics.  A second marker is an
-     * explicit opt-in for the geometry experiment once logs identify the
-     * fields; this prevents the diagnostic hook itself from black-screening. */
-    if (state && access("/mnt/sdcard/hcge_state_hook_apply.flag", F_OK) == 0) {
+    /* The rectangle is now known to be the active post-rotation destination.
+     * Apply the requested hardware viewport before submitting state. */
+    if (state) {
         int ow = 854, oh = 480;
         if (g_panel_scale == 0) {
             /* The state is the post-rotation landscape destination. */
@@ -137,8 +137,7 @@ static void sf3000_hcge_set_state_hook(void *ctx, void *state, unsigned int acce
 static int hwdisp_install_hcge_state_hook(void)
 {
     extern int sf3000_is_r36sx(void);
-    if (sf3000_is_r36sx() || !g_handle ||
-        access("/mnt/sdcard/hcge_state_hook.flag", F_OK) != 0)
+    if (sf3000_is_r36sx() || !g_handle)
         return 0;
     void *sym = dlsym(g_handle, "hcge_set_state");
     if (!sym) { DBG("DBG HCGE hook: symbol missing\n"); return -1; }
