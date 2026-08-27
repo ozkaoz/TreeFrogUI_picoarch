@@ -30,29 +30,6 @@ static SDL_Surface* screen;
 
 int sf3000_use_hwdisp = 0;
 
-/* Self-healing HW→SW fallback (SF3000-class disp_frame devices). Some units
- * can't render via the HW path (black screen / hang after logo). zhijack sets
- * TF_FORCE_SW=1 once it has detected that (watchdog + crash count) and dropped
- * a marker on the SD, so every later boot skips HW entirely. Read once. */
-int sf3000_force_sw(void) {
-    static int v = -1;
-    if (v < 0) v = getenv("TF_FORCE_SW") ? 1 : 0;
-    return v;
-}
-
-/* Breadcrumb that proves the HW path actually produced frames this boot: written
- * once after a handful of successful HW presents. zhijack's watchdog treats its
- * ABSENCE (process hung, or crashed before it appeared) as "HW is broken here". */
-static void sf3000_hw_heartbeat(void) {
-    static int frames = 0, done = 0;
-    if (done) return;
-    if (++frames >= 8) {
-        int fd = open("/tmp/hw_rendered", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (fd >= 0) close(fd);
-        done = 1;
-    }
-}
-
 /* cubevol shared memory: ftok("/tmp/joy_key", 'a') → 4-byte key state.
    Low 16 bits = button bitmask (bit set = pressed). */
 volatile uint32_t *sf3000_keys_ptr = NULL;
@@ -833,6 +810,10 @@ void plat_video_set_msg(const char *new_msg, unsigned priority, unsigned msec)
 static SDL_Surface* clean_screen = NULL;
 static const void* framebuffer; // NOTE: we don't own this
 static int g_game_w = 256, g_game_h = 224; /* actual game dimensions from core */
+#ifdef PLATFORM_SF3000
+extern int current_pixel_format;
+#endif
+
 void* plat_clean_screen(void) {
 	return scale_clean(framebuffer, clean_screen->pixels) ? clean_screen : NULL;
 }
@@ -840,6 +821,17 @@ void* plat_clean_screen(void) {
 void plat_video_process(const void *data, unsigned width, unsigned height, size_t pitch) {
 	if (!data) return;
 	framebuffer = data;
+	#ifdef PLATFORM_SF3000
+		static unsigned pv_n;
+		static unsigned pv_w, pv_h;
+		if (pv_n < 24 || width != pv_w || height != pv_h)
+			dbg_log("DBG plat_video_process pid=%d n=%u size=%ux%u pitch=%zu fmt=%d\n",
+			        getpid(), pv_n + 1, width, height, pitch, current_pixel_format);
+		if (pv_n < 24 || width != pv_w || height != pv_h)
+			fprintf(stderr, "TFDBG plat_video_process pid=%d n=%u size=%ux%u pitch=%zu fmt=%d\n",
+			        getpid(), pv_n + 1, width, height, pitch, current_pixel_format);
+		++pv_n; pv_w = width; pv_h = height;
+	#endif
 
 	static int had_msg = 0;
 	SDL_LockSurface(screen);
@@ -1858,8 +1850,8 @@ int sf3000_fb_init(void) {
      * already running) raced that mutex → `pthread_mutex_lock: __owner==0` SIGABRT
      * crash-loop (seen on R36SX and the old SF3000 menu experiment). It also gives
      * SF3000 a correct-aspect HW menu from cold (SW transpose squishes 854x480).
-     * SF3500 already inited + returned early above. Skipped under force_sw. */
-    if (!sf3000_use_hwdisp && !sf3000_force_sw()) {
+     * SF3500 already inited + returned early above. */
+    if (!sf3000_use_hwdisp) {
         extern int hwdisp_init(void);
         if (hwdisp_init() == 0) {
             sf3000_use_hwdisp = 1;
@@ -2128,60 +2120,6 @@ static void sf3000_hw_present_frame(const void *src, int w, int h, int pitch,
         return;
     }
 
-    /* Custom ratio source reshaping is deliberately disabled on SF3000: all
-     * per-frame CPU scaling is forbidden on this chipset. Arbitrary ratios
-     * must eventually be implemented through a driver/HCGE crop or viewport
-     * control, not by modifying the core frame. */
-    if (game_frame && scale_size == SCALE_SIZE_ASPECT && sf3000_aspect_forced() &&
-        scale_filter != SCALE_FILTER_BILINEAR) {
-        int m = (aspect_ratio_mode >= 0 && aspect_ratio_mode < ASPECT_N) ? aspect_ratio_mode : 1;
-        const struct aspect_def *d = &aspect_defs[m];
-        int tw = (h * d->num + d->den / 2) / d->den;
-        tw = (tw + 1) & ~1; /* odd source widths wedge this driver */
-        /* If the core already has the requested geometry, let the driver scale
-         * it directly. This is common for 320x240 content forced to 4:3. */
-        if (tw == w)
-            goto present;
-        if (tw > 0 && tw <= 1280 && h > 0 && h <= 720) {
-            static uint16_t *buf[2];
-            static int cap, bi;
-            static uint16_t xmap[1280];
-            static int map_w = -1, map_tw = -1;
-            int need = tw * h;
-            if (need > cap) {
-                free(buf[0]); free(buf[1]);
-                cap = need + 4096;
-                buf[0] = (uint16_t *)malloc((size_t)cap * 2);
-                buf[1] = (uint16_t *)malloc((size_t)cap * 2);
-            }
-            if (buf[0] && buf[1]) {
-                /* Division on this MIPS CPU is expensive. Geometry changes
-                 * rarely, so build the nearest-neighbour lookup once instead
-                 * of doing tw*h integer divisions on every frame. */
-                if (map_w != w || map_tw != tw) {
-                    for (int x = 0; x < tw; x++) {
-                        xmap[x] = (uint16_t)((unsigned)x * (unsigned)w /
-                                            (unsigned)tw);
-                    }
-                    map_w = w;
-                    map_tw = tw;
-                }
-                uint16_t *dst = buf[bi]; bi ^= 1;
-                const uint16_t *s = (const uint16_t *)src;
-                int sp = pitch / 2;
-                /* Only reshape the small source geometry here. The hardware
-                 * scaler performs the final filtered enlargement. */
-                for (int y = 0; y < h; y++) {
-                    const uint16_t *sr = s + (size_t)y * sp;
-                    uint16_t *dr = dst + (size_t)y * tw;
-                    for (int x = 0; x < tw; x++) dr[x] = sr[xmap[x]];
-                }
-                src = dst; w = tw; pitch = tw * 2;
-            }
-        }
-    }
-
-present:
     if (!(sf3000_is_r36sx() && hwdisp_present_direct(src, w, h, pitch)))
         hwdisp_present(src, w, h, pitch);
 }
@@ -2311,16 +2249,18 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
             s_last_w = width; s_last_h = height;
             s_blit = 0;
         }
-        if (s_blit < 8) {
+        if (s_blit < 24) {
             s_blit++;
             dbg_log("DBG blit#%d: src=%p screen=%p w=%d h=%d pitch=%d scale_filter=%d scale_size=%d use_hw=%d PANEL=%dx%d\n",
                     s_blit, src, (void*)screen->pixels, width, height, pitch,
                     scale_filter, scale_size, sf3000_use_hwdisp, PANEL_W, PANEL_H);
+            fprintf(stderr, "TFDBG blit#%d w=%d h=%d pitch=%d filter=%d scale=%d use_hw=%d\n",
+                    s_blit, width, height, pitch, scale_filter, scale_size, sf3000_use_hwdisp);
         }
     }
     /* R36SX: pass the user's scale-size choice (integer/aspect/full) to the HW
      * present so disp_frame fills / aspect-fits / integer-scales accordingly. */
-    if (sf3000_is_r36sx()) hwdisp_set_panel_scale((int)scale_size);
+    hwdisp_set_panel_scale((int)scale_size);
     /* WARM-BOOT: hwdisp pre-init'd by sf3000_fb_init via marker file.
      * For FrogUI panel-size frames, force HW bilinear pass-through — only path
      * proven safe with panel-native input.  Cold-boot FrogUI takes SW path
@@ -2347,7 +2287,7 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
     /* SF3000 panel-size frames are now safe: FrogUI already exercises this path
      * on every boot, and composed game frames use the same source geometry. */
     sf3000_detect_device();
-    if (!sf3000_use_hwdisp && !sf3000_force_sw() &&
+    if (!sf3000_use_hwdisp &&
         (sf3000_is_r36sx() || sf3000_is_sf3500() ||
          scale_filter == SCALE_FILTER_BILINEAR)) {
         if (hwdisp_init() == 0) {
@@ -2358,7 +2298,6 @@ void sf3000_fb_blit(const void *src, int width, int height, int pitch) {
 
 
 if (sf3000_use_hwdisp) {
-        sf3000_hw_heartbeat();  /* mark HW as alive once it has drawn a few frames */
         int game_frame = (src != screen->pixels);
         /* HW edge-sharpen: skip only for frames that actually take the pixel-exact
          * SW-nearest path (small game frames under Nearest). Panel-size frames

@@ -567,6 +567,18 @@ static bool pa_environment(unsigned cmd, void *data) {
 }
 
 static void pa_video_refresh(const void *data, unsigned width, unsigned height, size_t pitch) {
+	#ifdef PLATFORM_SF3000
+		/* Trace the callback before filtering NULL/quit frames.  This is the
+		 * authoritative boundary between the libretro core and the frontend. */
+		static unsigned sf_refresh_n;
+		if (sf_refresh_n < 24 || (sf_refresh_n && (sf_refresh_n % 600) == 0)) {
+			dbg_log("DBG video_refresh entry pid=%d n=%u data=%p size=%ux%u pitch=%zu quit=%d\n",
+			        getpid(), sf_refresh_n + 1, data, width, height, pitch, should_quit);
+			fprintf(stderr, "TFDBG video_refresh pid=%d n=%u data=%p size=%ux%u pitch=%zu quit=%d\n",
+			        getpid(), sf_refresh_n + 1, data, width, height, pitch, should_quit);
+		}
+		++sf_refresh_n;
+	#endif
 	if (data && !should_quit) {
 		pa_track_render();
 		plat_video_process(data, width, height, pitch);
@@ -764,10 +776,18 @@ int core_open(const char *corefile, const char *tag_name) {
 	set_audio_sample_batch = dlsym(current_core.handle, "retro_set_audio_sample_batch");
 	set_input_poll = dlsym(current_core.handle, "retro_set_input_poll");
 	set_input_state = dlsym(current_core.handle, "retro_set_input_state");
+	#ifdef PLATFORM_SF3000
+	DBG("DBG core symbols: video_set=%p audio_set=%p run=%p load=%p\n",
+	    (void *)set_video_refresh, (void *)set_audio_sample,
+	    (void *)current_core.retro_run, (void *)current_core.retro_load_game);
+	#endif
 
 	dlerror();
 	set_environment(pa_environment);
 	set_video_refresh(pa_video_refresh);
+	#ifdef PLATFORM_SF3000
+	DBG("DBG video callback registered: core=%s fn=%p\n", corefile, (void *)pa_video_refresh);
+	#endif
 	set_audio_sample(pa_audio_sample);
 	set_audio_sample_batch(pa_audio_sample_batch);
 	set_input_poll(pa_input_poll);

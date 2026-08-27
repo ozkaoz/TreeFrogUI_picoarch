@@ -153,6 +153,7 @@ void dbg_log(const char *fmt, ...) {
 	 * needed for display-mode debugging. */
 	static int enabled = -1;
 	static FILE *lf = NULL;
+	static unsigned log_lines;
 	if (enabled == -1) {
 		enabled = 1;
 		lf = fopen("/mnt/sdcard/log.txt", "a");
@@ -163,7 +164,8 @@ void dbg_log(const char *fmt, ...) {
 	vfprintf(lf, fmt, ap);
 	va_end(ap);
 	fflush(lf);
-	fsync(fileno(lf));   /* debug: persist each line (survives crash/power-cut) */
+	/* Keep diagnostics durable without forcing an SD sync for every frame. */
+	if ((++log_lines & 31u) == 0) fsync(fileno(lf));
 }
 
 static void sig_hex(char *b, int *n, unsigned long v) {
@@ -924,6 +926,8 @@ int main(int argc, char **argv) {
 	dbg_log("DBG picoarch start: text~%p (hi if 0x2x) argv1=%s next-bin=%s\n",
 	        (void *)&picoarch_for_core, argc > 1 ? argv[1] : "?",
 	        argc > 1 ? picoarch_for_core(argv[1]) : "?");
+	fprintf(stderr, "TFDBG start pid=%d argv1=%s next-bin=%s\n", getpid(),
+	        argc > 1 ? argv[1] : "?", argc > 1 ? picoarch_for_core(argv[1]) : "?");
 	/* QUICK RESUME: if FrogUI launch and a last-game marker exists with
 	 * quick-resume (settings key "auto_resume") on, redirect to that game.
 	 * State restore itself only happens if autosave_autoload is also on
@@ -1082,6 +1086,12 @@ int main(int argc, char **argv) {
 			current_core.retro_run();          /* render restored frame */
 		} else {
 			static int rw_fc = 0;
+			#ifdef PLATFORM_SF3000
+			static unsigned sf_run_n;
+			if (sf_run_n < 24 || (sf_run_n && (sf_run_n % 600) == 0))
+				DBG("DBG retro_run begin pid=%d n=%u core=%s quit=%d\n", getpid(), sf_run_n + 1, core_name, should_quit);
+			++sf_run_n;
+			#endif
 			current_core.retro_run();
 			/* capture every REWIND_INTERVAL frames — per-frame serialize is too
 			 * heavy (chops audio) and drains the ring too fast. */
@@ -1218,10 +1228,15 @@ int quit(int code) {
 			chmod(rom_path, 0755);
 			execl(rom_path, rom_path, standalone_rom[0] ? standalone_rom : NULL, NULL);
 		} else {
-			execl(picoarch_for_core(core_path), "picoarch", core_path, rom_path, NULL);
+			const char *next_bin = picoarch_for_core(core_path);
+			DBG("DBG exec game: bin=%s core=%s rom=%s\n", next_bin, core_path, rom_path);
+			execl(next_bin, "picoarch", core_path, rom_path, NULL);
+			DBG("DBG exec game FAILED: errno=%d (%s)\n", errno, strerror(errno));
 		}
 	}
+	DBG("DBG exec FrogUI fallback: bin=%s\n", PICOARCH_BIN);
 	execl(PICOARCH_BIN, "picoarch", FROGUI_CORE, FROGUI_CORE, NULL);
+	DBG("DBG exec FrogUI FAILED: errno=%d (%s)\n", errno, strerror(errno));
 	/* execl failed — fall through to normal cleanup and exit */
 #endif
 

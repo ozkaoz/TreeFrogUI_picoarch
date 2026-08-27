@@ -15,6 +15,7 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -45,6 +46,8 @@ typedef void (*fn_deinit_t)(void);
 typedef int  (*fn_disp_t)(void *src, int w, int h, int pitch);
 typedef void (*fn_aspect_t)(int fullscreen);
 typedef void (*fn_enhance_t)(int p0, int p1, int p2, int p3, int p4);
+typedef void (*fn_setting_t)(const void *setting);
+typedef int  (*fn_setmode_t)(int flags, int mode);
 
 static fn_init_t   p_init   = NULL;
 static fn_deinit_t p_deinit = NULL;
@@ -63,6 +66,8 @@ static void       **p_g_render = NULL;
  * Its "is_full_screen:%d" printf logs the ARGUMENT, not the stored value. Do
  * not infer the internal state from that driver message. */
 static fn_aspect_t p_aspect = NULL;
+static fn_setting_t p_setting = NULL;
+static fn_setmode_t p_setmode = NULL;
 static int         g_fs_state = -1;   /* last fill/aspect value pushed */
 static int         g_fs_num = -1, g_fs_den = -1; /* last ratio programmed */
 
@@ -73,6 +78,161 @@ static int         g_fs_num = -1, g_fs_den = -1; /* last ratio programmed */
  * sharpens the GE's bilinear scale toward nearest. */
 static fn_enhance_t p_enhance = NULL;
 static int          g_sharpen = -1;   /* last sharpness pushed (0-10); -1 = unset */
+static int          g_panel_scale;
+static int          g_aspect_num, g_aspect_den;
+
+/* Plaintext stock driver setting layout, recovered from its format string and
+ * video_driver_setting() stores: colour format, screen width/height, image
+ * width/height and image pitch. The function copies words 0, 3 and 4 into the
+ * live HCGE context; word 0 must remain RGB565 (1). */
+struct sf3000_setting_raw {
+    uint32_t color_format, screen_w, screen_h;
+    uint32_t img_w, img_h, img_pitch;
+};
+
+/* HCR-RTOS/HCFB exposes the scaler as a normal framebuffer ioctl.  The
+ * SF3000 kernel may or may not carry this interface (and the ioctl number is
+ * not present in the Linux fb headers), so probe it conservatively after the
+ * stock driver has initialized fb0.  We first re-submit the driver's current
+ * portrait transform; this is a no-op visually but tells us in log.txt
+ * whether this kernel accepts the interface before we try changing ratios. */
+struct sf3000_hcfb_scale { uint16_t h_div, v_div, h_mul, v_mul; };
+#ifndef HCFBIOSET_SCALE
+#define HCFBIOSET_SCALE _IOW(13, 0, struct sf3000_hcfb_scale)
+#endif
+#ifndef HCFBIOGET_SCALE_ONOFF
+#define HCFBIOGET_SCALE_ONOFF _IOR(13, 6, unsigned long)
+#endif
+
+static void hwdisp_probe_hcfb_scale(void) {
+    int fd = open("/dev/fb0", O_RDWR);
+    if (fd < 0) { DBG("DBG HCFB probe: open fb0 failed errno=%d\n", errno); return; }
+    unsigned long enabled = 0;
+    int gr = ioctl(fd, HCFBIOGET_SCALE_ONOFF, &enabled);
+    DBG("DBG HCFB probe: GET_SCALE_ONOFF ret=%d errno=%d value=%lu\n", gr, errno, enabled);
+    struct sf3000_hcfb_scale s = { 640, 480, 480, 854 };
+    int sr = ioctl(fd, HCFBIOSET_SCALE, &s);
+    DBG("DBG HCFB probe: SET_SCALE(640,480,480,854) ret=%d errno=%d\n", sr, errno);
+    close(fd);
+}
+
+static void hwdisp_apply_hcfb_scale(int num, int den) {
+    int fd = open("/dev/fb0", O_RDWR);
+    if (fd < 0 || den <= 0) { if (fd >= 0) close(fd); return; }
+    int out_w = (480 * num + den / 2) / den;
+    if (out_w < 1) out_w = 1;
+    if (out_w > 854) out_w = 854;
+    struct sf3000_hcfb_scale s = { 640, 480, 480, (uint16_t)out_w };
+    int rc = ioctl(fd, HCFBIOSET_SCALE, &s);
+    DBG("DBG HCFB aspect-post: target=%d/%d landscape=%dx480 ret=%d errno=%d\n",
+        num, den, out_w, rc, errno);
+    close(fd);
+}
+
+static void hwdisp_raw_viewport(int src_w, int src_h, int pitch) {
+    extern int sf3000_is_r36sx(void);
+    if (sf3000_is_r36sx() || src_w <= 0 || src_h <= 0) return;
+    int out_w = 854, out_h = 480;
+    if (g_panel_scale == 0) { /* Integer: largest exact source multiple. */
+        int n = 854 / src_w, ny = 480 / src_h;
+        if (ny < n) n = ny; if (n < 1) n = 1;
+        out_w = src_w * n; out_h = src_h * n;
+    } else if (g_panel_scale == 1 && g_aspect_num > 0 && g_aspect_den > 0) {
+        out_h = 480;
+        out_w = (out_h * g_aspect_num + g_aspect_den / 2) / g_aspect_den;
+        if (out_w > 854) out_w = 854;
+        if (out_w < 1) out_w = 1;
+    }
+    static int last_w, last_h, last_src_w, last_src_h, last_pitch;
+    if (out_w == last_w && out_h == last_h && src_w == last_src_w &&
+        src_h == last_src_h && pitch == last_pitch) return;
+    if (!p_setting) return;
+    struct sf3000_setting_raw setting = {
+        1u, (uint32_t)out_w, (uint32_t)out_h,
+        (uint32_t)src_w, (uint32_t)src_h, (uint32_t)pitch
+    };
+    p_setting(&setting);
+    last_w = out_w; last_h = out_h;
+    last_src_w = src_w; last_src_h = src_h; last_pitch = pitch;
+    DBG("DBG HCGE viewport setting: src=%dx%d pitch=%d out=%dx%d color_format=%u\n",
+        src_w, src_h, pitch, out_w, out_h, setting.color_format);
+}
+
+static int hwdisp_driver_present(void *src, int w, int h, int pitch) {
+    extern int sf3000_is_r36sx(void);
+    volatile unsigned int *dbg_ctx = (p_g_render && *p_g_render) ?
+        (volatile unsigned int *)*p_g_render : NULL;
+    if (dbg_ctx && !sf3000_is_r36sx())
+        DBG("DBG canvas pre: %u,%u scale_ctx=%u,%u,%u,%u\n",
+            dbg_ctx[0x3294/4], dbg_ctx[0x3290/4], dbg_ctx[0xda8/4],
+            dbg_ctx[0xdac/4], dbg_ctx[0xdb0/4], dbg_ctx[0xdb4/4]);
+    /* With the guarded canvas patch enabled, preserve the driver's menu
+     * envelope (320x240 is composed through its fixed 640x480 canvas), but
+     * program game-sized frames before signalling the render thread. */
+    if (access("/mnt/sdcard/hcge_canvas_patch.flag", F_OK) == 0 &&
+        p_g_render && *p_g_render && !sf3000_is_r36sx()) {
+        int ow = 854, oh = 480;
+        if ((w == 320 && h == 240) || (w == 854 && h == 480)) { ow = 640; oh = 480; }
+        if (g_panel_scale == 0) { int n = 854 / w, ny = 480 / h; if (ny < n) n = ny; if (n < 1) n = 1; ow = w*n; oh = h*n; }
+        else if (g_panel_scale == 1 && g_aspect_num > 0 && g_aspect_den > 0) { ow = (480*g_aspect_num + g_aspect_den/2)/g_aspect_den; if (ow < 1) ow = 1; if (ow > 854) ow = 854; }
+        volatile unsigned int *ctx = (volatile unsigned int *)*p_g_render;
+        ctx[0x3294/4] = (unsigned int)ow; ctx[0x3290/4] = (unsigned int)oh;
+        DBG("DBG experimental viewport-pre: src=%dx%d dst=%dx%d\n", w, h, ow, oh);
+    }
+    /* Let disp_frame perform any required HCGE initialization first. */
+    hwdisp_raw_viewport(w, h, pitch);
+    int rv = p_disp(src, w, h, pitch);
+    /* disp_frame may restore the stock scaler tuple during initialization;
+     * apply the requested HCFB tuple after it, for the following frame. */
+    /* HCFB writes are intentionally disabled: the ioctl accepts the tuple but
+     * the current orientation hypothesis squishes both menu and game output.
+     * Keep the probe/logging active until the portrait tuple is verified. */
+    if (dbg_ctx && !sf3000_is_r36sx())
+        DBG("DBG canvas post: %u,%u scale_ctx=%u,%u,%u,%u rv=%d\n",
+            dbg_ctx[0x3294/4], dbg_ctx[0x3290/4], dbg_ctx[0xda8/4],
+            dbg_ctx[0xdac/4], dbg_ctx[0xdb0/4], dbg_ctx[0xdb4/4], rv);
+    /* The private driver rewrites the canvas during disp_frame().  Update the
+     * live canvas after that write so the following frame uses the requested
+     * hardware viewport. This is guarded by the existing diagnostic marker. */
+    if (dbg_ctx && !sf3000_is_r36sx() &&
+        access("/mnt/sdcard/hcge_canvas_patch.flag", F_OK) == 0) {
+        unsigned ow = 854, oh = 480;
+        if (g_panel_scale == 0) {
+            int n = 854 / w, ny = 480 / h; if (ny < n) n = ny; if (n < 1) n = 1;
+            ow = (unsigned)(w * n); oh = (unsigned)(h * n);
+        } else if (g_panel_scale == 1 && g_aspect_num > 0 && g_aspect_den > 0) {
+            ow = (unsigned)((480 * g_aspect_num + g_aspect_den / 2) / g_aspect_den);
+            if (ow < 1) ow = 1; if (ow > 854) ow = 854;
+        }
+        dbg_ctx[0x3294/4] = ow;
+        dbg_ctx[0x3290/4] = oh;
+        fprintf(stderr, "TFDBG context viewport post: src=%dx%d dst=%ux%u\n", w, h, ow, oh);
+    }
+    return rv;
+}
+
+static void hwdisp_patch_sf3000_canvas_stores(void) {
+    extern int sf3000_is_r36sx(void);
+    if (sf3000_is_r36sx() || !p_disp) return;
+    if (access("/mnt/sdcard/hcge_canvas_patch.flag", F_OK) != 0) {
+        DBG("DBG canvas patch: disabled (create hcge_canvas_patch.flag to test)\n");
+        return;
+    }
+    /* driver.so 1.0.0: video_driver_disp_frame+0xa8/+0xb0 are the stores
+     * that unconditionally write 640 and 480 into the live HCGE canvas. */
+    volatile uint32_t *a = (volatile uint32_t *)((unsigned char *)p_disp + 0xa8);
+    volatile uint32_t *b = (volatile uint32_t *)((unsigned char *)p_disp + 0xb0);
+    if (*a != 0xae823294u || *b != 0xafc23290u) {
+        DBG("DBG canvas patch: signature mismatch %08x/%08x\n", *a, *b); return;
+    }
+    long ps = sysconf(_SC_PAGESIZE); if (ps <= 0) ps = 4096;
+    uintptr_t page = (uintptr_t)a & ~((uintptr_t)ps - 1);
+    if (mprotect((void *)page, (size_t)ps, PROT_READ|PROT_WRITE|PROT_EXEC) != 0) return;
+    *a = 0; *b = 0;
+    __builtin___clear_cache((char *)a, (char *)b + sizeof(*b));
+    mprotect((void *)page, (size_t)ps, PROT_READ|PROT_EXEC);
+    DBG("DBG canvas patch: disabled hardcoded 640x480 stores\n");
+}
 
 /* SF3000's stock generic game branch hardcodes a 640x480 virtual surface.
  * Change only that immediate on the known 854x480 driver so HCGE scales core
@@ -143,6 +303,7 @@ static uint16_t *g_near_buf = NULL;
 
 static int g_aspect_num = 0;
 static int g_aspect_den = 0;
+static int g_hcfb_w = -1;
 static int g_filter_nearest = 0;   /* SW-scale path (true nearest OR sharp) */
 static int g_filter_sharp   = 0;   /* sharp variant: integer prescale + HW residual */
 
@@ -253,6 +414,8 @@ int hwdisp_init(void) {
     p_disp   = (fn_disp_t)  dlsym(g_handle, "video_driver_disp_frame");
     p_g_render = (void **)dlsym(g_handle, "g_render");
     p_aspect = (fn_aspect_t)dlsym(g_handle, "fbdev_video_aspect_ratio");
+    p_setting = (fn_setting_t)dlsym(g_handle, "video_driver_setting");
+    p_setmode = (fn_setmode_t)dlsym(g_handle, "video_driver_setmode");
     p_enhance = (fn_enhance_t)dlsym(g_handle, "fbdev_set_enhance");
     g_native_game_surface = 0;
     g_fs_state = -1;
@@ -265,14 +428,15 @@ int hwdisp_init(void) {
         return -1;
     }
 
-    hwdisp_patch_sf3000_game_surface();
+    /* Keep the stock 640x480 game canvas. The driver’s aspect-fit path uses
+     * that virtual surface; forcing it to 854x480 makes every mode fullscreen
+     * before the hardware scaler can preserve the requested ratio. */
     int rv = p_init();
     if (rv <= 0) {
         fprintf(stderr, "hwdisp: video_drivers_init returned %d\n", rv);
         dlclose(g_handle); g_handle = NULL;
         return -1;
     }
-
     g_active = 1;
     fprintf(stderr, "hwdisp: HW path active (init rv=%d g_render=%p ctx=%p)\n",
             rv, (void *)p_g_render, p_g_render ? *p_g_render : NULL);
@@ -288,6 +452,7 @@ int hwdisp_init(void) {
         DBG("DBG hwdisp: setmode=%p calling setmode(0,0)\n", (void*)p_setmode);
         if (p_setmode) { int sr = p_setmode(0, 0); DBG("DBG hwdisp: setmode(0,0) ret=%d\n", sr); }
     }
+    if (!sf3000_is_r36sx()) hwdisp_probe_hcfb_scale();
     g_sharpen = -1;   /* force re-apply on the next hwdisp_set_sharpen() */
     sf3000_dump_fb_state("hwdisp_init/post");
     /* fb0 for direct presents is mmap'd lazily by hwdisp_present_direct(). */
@@ -329,6 +494,34 @@ static void clear_fb0_for_shutdown(void) {
 void hwdisp_set_target_aspect(int num, int den) {
     g_aspect_num = num;
     g_aspect_den = den;
+    /* SF3000's HCFB scaler is portrait before the panel's 270-degree
+     * transform: 640x480 input maps to 480x854 output.  Unlike the private
+     * video_driver_setting() helper, this ioctl actually controls the live
+     * framebuffer layer.  Program only when the requested landscape width
+     * changes; keep the panel height at 480 and let the driver center bars. */
+    extern int sf3000_is_r36sx(void);
+    if (!sf3000_is_r36sx() && p_setmode && den > 0) {
+        int mode = -1;
+        if (num * 3 == den * 4) mode = 1;       /* stock driver: 4:3 */
+        else if (num * 9 == den * 16) mode = 0; /* stock driver: 16:9 */
+        static int last_mode = -2;
+        if (mode >= 0 && mode != last_mode) {
+            int rc = p_setmode(0, mode);
+            fprintf(stderr, "TFDBG driver setmode: mode=%d rc=%d\n", mode, rc);
+            last_mode = mode;
+        }
+    }
+    if (!sf3000_is_r36sx() && den > 0) {
+        int out_w = (480 * num + den / 2) / den;
+        if (out_w < 1) out_w = 1;
+        if (out_w > 854) out_w = 854;
+        DBG("DBG target aspect: %d/%d HCFB tuple 640,480,480,%d\n",
+            num, den, out_w);
+        fprintf(stderr, "TFDBG target aspect: %d/%d HCFB tuple 640,480,480,%d\n",
+                num, den, out_w);
+    } else {
+        DBG("DBG target aspect: %d/%d (HCFB probe skipped)\n", num, den);
+    }
 }
 
 /* filter: scale_filter enum — 0 nearest, 1 bilinear, 2 sharp (integer prescale
@@ -776,6 +969,9 @@ void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {
     if (lg) DBG("DBG present#%d: src=%p w=%d h=%d pitch=%d active=%d p_disp=%p filt=%d asp=%d/%d HW=%dx%d\n",
                 s_n, src, w, h, pitch_bytes, g_active, (void*)p_disp,
                 g_filter_nearest, g_aspect_num, g_aspect_den, HW_W, HW_H);
+    if (lg) fprintf(stderr, "TFDBG present#%d src=%p %dx%d pitch=%d filt=%d asp=%d/%d hw=%d\n",
+                    s_n, src, w, h, pitch_bytes, g_filter_nearest,
+                    g_aspect_num, g_aspect_den, g_active);
     if (!g_active || !src) { if (lg) DBG("DBG present#%d: EARLY-RET\n", s_n); return; }
     if (!p_disp) { if (lg) DBG("DBG present#%d: no p_disp\n", s_n); return; }
     /* SF-class presents use this path (not present_direct).  Keep the
@@ -794,21 +990,14 @@ void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {
         }
     }
     int rv;
-    /* Nearest filter: SW upscale to 1280×720, driver does no further scale. */
-    if (g_filter_nearest) {
-        if (!g_near_buf) {
-            g_near_buf = (uint16_t*)malloc(HW_BUFSZ);
-            if (g_near_buf) memset(g_near_buf, 0, HW_BUFSZ);
-        }
-        if (g_near_buf) {
-            upscale_nearest(src, w, h, pitch_bytes);
-            if (lg) DBG("DBG present#%d: nearest pre p_disp(%p,%d,%d,%d)\n", s_n, (void*)g_near_buf, HW_W, HW_H, HW_PITCH);
-            rv = p_disp(g_near_buf, HW_W, HW_H, HW_PITCH);
-            if (lg) DBG("DBG present#%d: nearest post p_disp rv=%d\n", s_n, rv);
-            return;
-        }
-        /* Fallthrough to HW path if alloc failed */
-    }
+    /* SF-class hardware has no viable software-scaling budget.  Always submit
+     * the native frame to the HCGE driver; its scaler remains the sole
+     * presentation path.  The old nearest branch expanded every frame on the
+     * MIPS CPU, causing severe slowdown/audio underruns and masking driver
+     * geometry bugs.  Keep g_filter_nearest for menu compatibility/logging,
+     * but never consume it here. */
+    if (g_filter_nearest && lg)
+        DBG("DBG present#%d: nearest requested; ignored on SF HCGE (HW-only)\n", s_n);
 
     /* Unpadded presents must NOT hand the core's live framebuffer to
      * disp_frame — its HCGE DMA reads the source asynchronously while the core
@@ -833,9 +1022,23 @@ void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {
     /* HW (bilinear) path: pass through, optional aspect pad. */
     if (g_aspect_num <= 0 || g_aspect_den <= 0) {
         if (lg) DBG("DBG present#%d: passthru pre p_disp(%p,%d,%d,%d)\n", s_n, psrc, w, h, ppitch);
-        rv = p_disp((void *)psrc, w, h, ppitch);
+        rv = hwdisp_driver_present((void *)psrc, w, h, ppitch);
         if (lg) DBG("DBG present#%d: passthru post p_disp rv=%d\n", s_n, rv);
         return;
+    }
+
+    /* SF3000/SF3500 must never reshape or pad the core frame in software.
+     * The raw HCFB viewport below is the hardware crop/scale mechanism.  The
+     * old pad_horizontal path produced the 292/398/426-wide NES frames seen
+     * in the driver log and defeated the whole HCGE experiment. */
+    {
+        extern int sf3000_is_r36sx(void);
+        if (!sf3000_is_r36sx()) {
+            if (lg) DBG("DBG present#%d: SF-class raw viewport passthru\n", s_n);
+            rv = hwdisp_driver_present((void *)psrc, w, h, ppitch);
+            if (lg) DBG("DBG present#%d: raw viewport post rv=%d\n", s_n, rv);
+            return;
+        }
     }
 
     int pad_w = h * g_aspect_num / g_aspect_den;
@@ -843,19 +1046,19 @@ void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {
                     * 853 for 480-tall, 455 for 256-tall). Round to even. */
     if (pad_w <= w) {
         if (lg) DBG("DBG present#%d: nopad pre p_disp\n", s_n);
-        rv = p_disp((void *)psrc, w, h, ppitch);
+        rv = hwdisp_driver_present((void *)psrc, w, h, ppitch);
         if (lg) DBG("DBG present#%d: nopad post p_disp rv=%d\n", s_n, rv);
         return;
     }
 
     pad_horizontal(psrc, w, h, ppitch, pad_w);
     if (!g_pad_buf) {
-        rv = p_disp((void *)psrc, w, h, ppitch);
+        rv = hwdisp_driver_present((void *)psrc, w, h, ppitch);
         if (lg) DBG("DBG present#%d: padfail post rv=%d\n", s_n, rv);
         return;
     }
     if (lg) DBG("DBG present#%d: pad pre p_disp(pad_w=%d)\n", s_n, pad_w);
-    rv = p_disp(g_pad_buf, pad_w, h, pad_w * 2);
+    rv = hwdisp_driver_present(g_pad_buf, pad_w, h, pad_w * 2);
     if (lg) DBG("DBG present#%d: pad post p_disp rv=%d\n", s_n, rv);
 }
 
