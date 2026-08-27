@@ -17,6 +17,7 @@
 #include <string.h>
 #include <errno.h>
 #include <dlfcn.h>
+#include <link.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/time.h>
@@ -67,6 +68,9 @@ static void       **p_g_render = NULL;
  * not infer the internal state from that driver message. */
 static fn_aspect_t p_aspect = NULL;
 static fn_setting_t p_setting = NULL;
+typedef void (*fn_hcge_set_state_t)(void *, void *, unsigned int);
+static fn_hcge_set_state_t g_hcge_set_state_orig = NULL;
+static unsigned int g_hcge_hook_calls = 0;
 static fn_setmode_t p_setmode = NULL;
 static int         g_fs_state = -1;   /* last fill/aspect value pushed */
 static int         g_fs_num = -1, g_fs_den = -1; /* last ratio programmed */
@@ -89,6 +93,110 @@ struct sf3000_setting_raw {
     uint32_t color_format, screen_w, screen_h;
     uint32_t img_w, img_h, img_pitch;
 };
+
+/* Optional diagnostic hook for the private HCGE state submission.  The stock
+ * SF3000 driver calls hcge_set_state through its MIPS GOT.  Swapping that GOT
+ * entry lets us observe the real rectangle after fb_paint_task builds it,
+ * without changing the driver text or its render-thread ABI.  Geometry writes
+ * are separately gated by hcge_state_hook_apply.flag. */
+static void sf3000_hcge_set_state_hook(void *ctx, void *state, unsigned int accel)
+{
+    volatile uint32_t *s = (volatile uint32_t *)state;
+    unsigned int n = ++g_hcge_hook_calls;
+    if (state && (n <= 12 || (n & 255u) == 0))
+        DBG("DBG HCGE hook #%u ctx=%p state=%p accel=0x%x rect=%u,%u %ux%u mode=%u\n",
+            n, ctx, state, accel, s[0xb0/4], s[0xb4/4], s[0xb8/4],
+            s[0xbc/4], s[0xc8/4]);
+
+    /* Never alter state during ordinary diagnostics.  A second marker is an
+     * explicit opt-in for the geometry experiment once logs identify the
+     * fields; this prevents the diagnostic hook itself from black-screening. */
+    if (state && access("/mnt/sdcard/hcge_state_hook_apply.flag", F_OK) == 0) {
+        int ow = 854, oh = 480;
+        if (g_panel_scale == 0) {
+            /* The state is the post-rotation landscape destination. */
+            unsigned int sw = s[0x90/4], sh = s[0x94/4];
+            int nx = sw ? 854 / (int)sw : 1, ny = sh ? 480 / (int)sh : 1;
+            int mul = nx < ny ? nx : ny; if (mul < 1) mul = 1;
+            ow = (int)sw * mul; oh = (int)sh * mul;
+        } else if (g_panel_scale == 1 && g_aspect_num > 0 && g_aspect_den > 0) {
+            ow = (480 * g_aspect_num + g_aspect_den / 2) / g_aspect_den;
+            if (ow < 1) ow = 1; if (ow > 854) ow = 854;
+        }
+        s[0xb0/4] = (unsigned int)((854 - ow) / 2);
+        s[0xb4/4] = (unsigned int)((480 - oh) / 2);
+        s[0xb8/4] = (unsigned int)ow;
+        s[0xbc/4] = (unsigned int)oh;
+        DBG("DBG HCGE hook APPLY dst=%d,%d %dx%d\n",
+            (854 - ow) / 2, (480 - oh) / 2, ow, oh);
+    }
+    if (g_hcge_set_state_orig)
+        g_hcge_set_state_orig(ctx, state, accel);
+}
+
+static int hwdisp_install_hcge_state_hook(void)
+{
+    extern int sf3000_is_r36sx(void);
+    if (sf3000_is_r36sx() || !g_handle ||
+        access("/mnt/sdcard/hcge_state_hook.flag", F_OK) != 0)
+        return 0;
+    void *sym = dlsym(g_handle, "hcge_set_state");
+    if (!sym) { DBG("DBG HCGE hook: symbol missing\n"); return -1; }
+    struct link_map *lm = NULL;
+    if (dlinfo(g_handle, RTLD_DI_LINKMAP, &lm) != 0 || !lm || !lm->l_ld) {
+        DBG("DBG HCGE hook: link_map unavailable\n"); return -1;
+    }
+    ElfW(Addr) got_addr = 0; unsigned long local = 0, symno = 0, gotsym = 0;
+    for (ElfW(Dyn) *d = lm->l_ld; d->d_tag != DT_NULL; ++d) {
+        if (d->d_tag == DT_PLTGOT) got_addr = d->d_un.d_ptr;
+        else if (d->d_tag == DT_MIPS_LOCAL_GOTNO) local = d->d_un.d_val;
+        else if (d->d_tag == DT_MIPS_SYMTABNO) symno = d->d_un.d_val;
+        else if (d->d_tag == DT_MIPS_GOTSYM) gotsym = d->d_un.d_val;
+    }
+    if (!got_addr || !local || symno < gotsym) {
+        DBG("DBG HCGE hook: invalid GOT metadata got=%p local=%lu sym=%lu/%lu\n",
+            (void *)got_addr, local, symno, gotsym); return -1;
+    }
+    size_t count = local + (symno - gotsym);
+    volatile ElfW(Addr) *got = (volatile ElfW(Addr) *)got_addr;
+    /* fb_paint_task's SF3000 binary loads hcge_set_state with
+     *     lw t9,-32480(gp)
+     * and its gp setup makes that the fourth word of the GOT (offset
+     * 0x10).  The old symbol scan misses this slot on some loader builds:
+     * the slot is pre-resolved before dlsym() returns and its value is not
+     * necessarily the same function descriptor.  Prefer the known callsite
+     * slot, but retain the metadata scan for driver revisions. */
+    size_t candidate = (size_t)-1;
+    if (lm->l_addr && got_addr == (ElfW(Addr))(lm->l_addr + 0x23360)) {
+        candidate = 2 + 2; /* GOT[4], corresponding to gp-32480 in fb_paint_task */
+        if (candidate >= count || (void *)(uintptr_t)got[candidate] != sym) {
+            DBG("DBG HCGE hook: known GOT[4]=%p expected=%p; scanning\n",
+                (void *)(uintptr_t)(candidate < count ? got[candidate] : 0), sym);
+            candidate = (size_t)-1;
+        }
+    }
+    for (size_t pass = 0; pass < 2; ++pass) {
+        size_t begin = pass == 0 && candidate != (size_t)-1 ? candidate : 0;
+        size_t end = pass == 0 && candidate != (size_t)-1 ? candidate + 1 : count;
+        for (size_t i = begin; i < end; ++i) {
+            if ((void *)(uintptr_t)got[i] != sym) continue;
+        g_hcge_set_state_orig = (fn_hcge_set_state_t)(uintptr_t)got[i];
+        long ps = sysconf(_SC_PAGESIZE); if (ps <= 0) ps = 4096;
+        uintptr_t page = (uintptr_t)&got[i] & ~((uintptr_t)ps - 1);
+        if (mprotect((void *)page, (size_t)ps, PROT_READ|PROT_WRITE) != 0) {
+            DBG("DBG HCGE hook: mprotect failed errno=%d\n", errno); return -1;
+        }
+        got[i] = (ElfW(Addr))(uintptr_t)sf3000_hcge_set_state_hook;
+        __builtin___clear_cache((char *)&got[i], (char *)&got[i] + sizeof(got[i]));
+        mprotect((void *)page, (size_t)ps, PROT_READ);
+        DBG("DBG HCGE hook: installed GOT[%zu] orig=%p hook=%p\n", i,
+            (void *)g_hcge_set_state_orig, (void *)sf3000_hcge_set_state_hook);
+        return 1;
+        }
+    }
+    DBG("DBG HCGE hook: GOT target not found sym=%p entries=%zu\n", sym, count);
+    return -1;
+}
 
 /* HCR-RTOS/HCFB exposes the scaler as a normal framebuffer ioctl.  The
  * SF3000 kernel may or may not carry this interface (and the ioctl number is
@@ -431,6 +539,9 @@ int hwdisp_init(void) {
     /* Keep the stock 640x480 game canvas. The driver’s aspect-fit path uses
      * that virtual surface; forcing it to 854x480 makes every mode fullscreen
      * before the hardware scaler can preserve the requested ratio. */
+    /* Install before video_drivers_init: it creates the paint thread and the
+     * first HCGE submission can happen during initialization. */
+    hwdisp_install_hcge_state_hook();
     int rv = p_init();
     if (rv <= 0) {
         fprintf(stderr, "hwdisp: video_drivers_init returned %d\n", rv);
