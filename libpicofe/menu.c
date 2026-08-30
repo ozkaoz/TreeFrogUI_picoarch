@@ -1628,10 +1628,24 @@ static void draw_key_config(const me_bind_action *opts, int opt_cnt, int player_
 	char buff[64], buff2[32];
 	const char *dev_name;
 	int x, y, w, i;
+	int first, visible;
+	const int footer_y = g_menuscreen_h - 4 * me_mfont_h;
 
-	w = ((player_idx >= 0) ? 20 : 30) * me_mfont_w;
+	/* Thirty columns fit the longest binding plus the scroll-range indicator
+	 * on the compact menu surface. */
+	w = 30 * me_mfont_w;
 	x = g_menuscreen_w / 2 - w / 2;
-	y = (g_menuscreen_h - 4 * me_mfont_h) / 2 - (2 + opt_cnt) * me_mfont_h / 2;
+	/* Keep the binding list entirely above the fixed four-row footer.  Derive
+	 * the viewport from the live menu surface: SF3000 currently presents a
+	 * hardware-scaled menu source, while other targets may render directly at
+	 * panel resolution. */
+	visible = footer_y / me_mfont_h - 2; /* two rows for the title/gap */
+	if (visible < 1) visible = 1;
+	if (visible > opt_cnt) visible = opt_cnt;
+	first = sel - visible / 2;
+	if (first < 0) first = 0;
+	if (first > opt_cnt - visible) first = opt_cnt - visible;
+	y = (footer_y - (2 + visible) * me_mfont_h) / 2;
 	if (x < me_mfont_w * 2)
 		x = me_mfont_w * 2;
 	if (y < 0)
@@ -1641,11 +1655,15 @@ static void draw_key_config(const me_bind_action *opts, int opt_cnt, int player_
 		text_out16(x, y, "Player %i controls", player_idx + 1);
 	else
 		text_out16(x, y, "Emulator controls");
+	if (visible < opt_cnt)
+		text_out16(x + w - 7 * me_mfont_w, y, "%i-%i/%i",
+			first + 1, first + visible, opt_cnt);
 
 	y += 2 * me_mfont_h;
-	menu_draw_selection(x - me_mfont_w * 2, y + sel * me_mfont_h, w + 2 * me_mfont_w);
+	menu_draw_selection(x - me_mfont_w * 2,
+		y + (sel - first) * me_mfont_h, w + 2 * me_mfont_w);
 
-	for (i = 0; i < opt_cnt; i++, y += me_mfont_h) {
+	for (i = first; i < first + visible; i++, y += me_mfont_h) {
 		int sel_row = menu_font_ready() && (i == sel);
 		int save_col = menu_text_color;
 		if (sel_row) menu_text_color = menu_sel_text_color;
