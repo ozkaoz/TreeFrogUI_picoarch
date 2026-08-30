@@ -13,6 +13,7 @@ int limit_frames;
 int enable_audio;
 int ff_enabled;       /* per-core: allow fast-forward (SELECT+R1) */
 int rewind_enabled;   /* per-core: allow rewind (reserves RAM, slows frames) */
+int audio_mono;
 unsigned audio_buffer_size;
 enum scale_size scale_size;
 enum scale_filter scale_filter;

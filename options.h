@@ -10,6 +10,7 @@ extern int limit_frames;
 extern int enable_audio;
 extern int ff_enabled;
 extern int rewind_enabled;
+extern int audio_mono;
 extern unsigned audio_buffer_size;
 extern enum scale_size scale_size;
 extern enum scale_filter scale_filter;

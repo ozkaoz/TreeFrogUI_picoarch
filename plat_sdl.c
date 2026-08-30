@@ -992,7 +992,10 @@ void sf3000_apply_snd_gain(void) {
 	if (sf3000_snd_gain_pct > 100) sf3000_snd_gain_pct = 100;
 	sf3000_snd_gain_q8 = sf3000_snd_gain_pct * 256 / 100;
 	FILE *f = fopen(SF3000_SNDGAIN_PATH, "w");
-	if (f) { fprintf(f, "%d\n", sf3000_snd_gain_pct); fflush(f); fsync(fileno(f)); fclose(f); sync(); }
+	/* This runs while leaving the pause menu.  fsync()+sync() used to block the
+	 * emulation thread long enough to starve the audio ring and make every
+	 * volume adjustment burp.  The tiny preference may be flushed lazily. */
+	if (f) { fprintf(f, "%d\n", sf3000_snd_gain_pct); fclose(f); }
 }
 
 static void sf3000_load_snd_gain(void) {
@@ -1012,11 +1015,12 @@ static void sf3000_load_snd_gain(void) {
 #define SF3000_ARING_MASK   (SF3000_ARING_FRAMES - 1)
 #define SF3000_ACHUNK       480           /* 10ms at the fixed 48kHz DAC rate */
 #define SF3000_APREFILL     1440          /* 30ms cushion for expensive scaled frames */
-#define SF3000_AGRACE_POLLS 6             /* tolerate 12ms of producer jitter */
 
 static struct audio_frame sf3000_aring[SF3000_ARING_FRAMES];
 static unsigned           sf3000_aring_w = 0;   /* producer: emu thread   */
 static unsigned           sf3000_aring_r = 0;   /* consumer: audio thread */
+static unsigned           sf3000_underruns = 0;
+static unsigned           sf3000_overruns = 0;
 static pthread_mutex_t    sf3000_aring_mtx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t          sf3000_audio_thread;
 static volatile int       sf3000_audio_running = 0;
@@ -1065,8 +1069,9 @@ static void *sf3000_audio_thread_fn(void *unused)
 	struct audio_frame chunk[SF3000_ACHUNK];
 	uint64_t next_us = 0;
 	int primed = 0;
-	int short_polls = 0;
 	int driver_active = 0;
+	int recovering = 0;
+	struct audio_frame last = { 0, 0 };
 
 	/* Init the DAC ON THIS THREAD. The SF3500/HD/SF3100 driver keeps its audio
 	 * handle thread-local, so sound_driver_init() and sound_driver_playframe()
@@ -1100,6 +1105,8 @@ static void *sf3000_audio_thread_fn(void *unused)
 			pthread_mutex_unlock(&sf3000_aring_mtx);
 			primed = 0;
 			next_us = 0;
+			recovering = 0;
+			last.left = last.right = 0;
 			usleep(2000);
 			continue;
 		}
@@ -1107,7 +1114,8 @@ static void *sf3000_audio_thread_fn(void *unused)
 		pthread_mutex_lock(&sf3000_aring_mtx);
 		unsigned avail = sf3000_aring_w - sf3000_aring_r;  /* free-running */
 		if (sf3000_audio_resume_immediate) {
-			primed = 1;
+			/* The menu deliberately flushed the queue.  Do not force playback
+			 * from that empty queue; wait for the normal prefill below. */
 			sf3000_audio_resume_immediate = 0;
 		}
 		/* Libretro cores submit audio in one-video-frame bursts. Buffer 30ms
@@ -1117,19 +1125,55 @@ static void *sf3000_audio_thread_fn(void *unused)
 		 * poll into a full re-prime (and an audible 20ms gap). */
 		if (!primed && avail >= SF3000_APREFILL)
 			primed = 1;
-		if (primed && avail >= SF3000_ACHUNK) {
-			for (int i = 0; i < SF3000_ACHUNK; i++) {
+		if (primed) {
+			unsigned take = avail < SF3000_ACHUNK ? avail : SF3000_ACHUNK;
+			for (unsigned i = 0; i < take; i++) {
 				chunk[i] = sf3000_aring[sf3000_aring_r & SF3000_ARING_MASK];
 				sf3000_aring_r++;
 			}
-			have_chunk = 1;
-			short_polls = 0;
-		} else if (primed && avail < SF3000_ACHUNK) {
-			if (++short_polls >= SF3000_AGRACE_POLLS) {
-				primed = 0;
-				short_polls = 0;
-				next_us = 0;
+			/* Blend from the preceding concealed tail into newly available audio
+			 * instead of jumping straight to an arbitrary sample.  For a long stall
+			 * `last` is zero; for a short miss it is the held waveform sample. */
+			if (recovering && take) {
+				unsigned fade = take < 64 ? take : 64;
+				for (unsigned i = 0; i < fade; i++) {
+					int32_t ldelta = (int32_t)chunk[i].left - last.left;
+					int32_t rdelta = (int32_t)chunk[i].right - last.right;
+					chunk[i].left = (int16_t)(last.left + ldelta * (i + 1) / fade);
+					chunk[i].right = (int16_t)(last.right + rdelta * (i + 1) / fade);
+				}
+				recovering = 0;
 			}
+			/* Never starve the proprietary driver once playback has started.
+			 * Stopping writes until a full re-prime made a brief scheduling miss
+			 * turn into a 30ms hole, and restarting on an arbitrary waveform edge
+			 * produced the reported crackle.  Preserve cadence and ramp the missing
+			 * tail to zero instead.  Usually this conceals only a handful of frames. */
+			if (take < SF3000_ACHUNK) {
+				struct audio_frame from = take ? chunk[take - 1] : last;
+				unsigned missing = SF3000_ACHUNK - take;
+				/* Tiny SNES shortages (often just 2--60 frames) must not be
+				 * amplified into a full fade-to-zero.  Hold the edge for up to
+				 * 3.3ms; reserve silence fading for a substantial stall. */
+				if (missing <= 160) {
+					for (unsigned i = 0; i < missing; i++)
+						chunk[take + i] = from;
+				} else {
+					for (unsigned i = 0; i < missing; i++) {
+						unsigned remain = missing - i - 1;
+						chunk[take + i].left = (int16_t)((int32_t)from.left * remain / missing);
+						chunk[take + i].right = (int16_t)((int32_t)from.right * remain / missing);
+					}
+				}
+				if (++sf3000_underruns <= 8 ||
+				    !(sf3000_underruns & (sf3000_underruns - 1)))
+					dbg_log("DBG A: underrun #%u: had %u/%u frames (overruns=%u)\n",
+					        sf3000_underruns, take, SF3000_ACHUNK,
+					        sf3000_overruns);
+				recovering = 1;
+			}
+			last = chunk[SF3000_ACHUNK - 1];
+			have_chunk = 1;
 		}
 		pthread_mutex_unlock(&sf3000_aring_mtx);
 
@@ -1146,6 +1190,19 @@ static void *sf3000_audio_thread_fn(void *unused)
 			for (int i = 0; i < SF3000_ACHUNK; i++) {
 				chunk[i].left  = (int16_t)(((int)chunk[i].left  * sf3000_snd_gain_q8) >> 8);
 				chunk[i].right = (int16_t)(((int)chunk[i].right * sf3000_snd_gain_q8) >> 8);
+			}
+		}
+
+		/* SF3000-class handhelds have one physical speaker.  Feeding the stock
+		 * driver hard-panned stereo can therefore lose whichever channel is not
+		 * wired to that speaker (very obvious in Mega Drive music).  Downmix with
+		 * 32-bit accumulation to avoid overflow, then feed mono to both lanes. */
+		if (audio_mono) {
+			for (int i = 0; i < SF3000_ACHUNK; i++) {
+				/* Arithmetic shift is cheaper than division on this MIPS target.
+				 * The one-bit negative rounding difference is inaudible. */
+				int16_t mono = (int16_t)(((int32_t)chunk[i].left + chunk[i].right) >> 1);
+				chunk[i].left = chunk[i].right = mono;
 			}
 		}
 
@@ -1174,8 +1231,9 @@ static void *sf3000_audio_thread_fn(void *unused)
 			sf3000_aring_r = sf3000_aring_w;
 			pthread_mutex_unlock(&sf3000_aring_mtx);
 			primed = 0;
-			short_polls = 0;
 			next_us = 0;
+			recovering = 0;
+			last.left = last.right = 0;
 			dbg_log("DBG A: runtime audio recovery OK\n");
 			continue;
 		}
@@ -1267,6 +1325,7 @@ static int plat_sound_init(void)
 	/* Start the non-blocking audio consumer thread (it init's the DAC itself). */
 	sf3000_load_snd_gain();   /* re-read cubegm/sndgain.txt each game launch */
 	sf3000_aring_w = sf3000_aring_r = 0;
+	sf3000_underruns = sf3000_overruns = 0;
 	sf3000_rs_phase = 0;
 	sf3000_rs_prev.left = sf3000_rs_prev.right = 0;
 	sf3000_audio_init_rc = 0;
@@ -1342,17 +1401,35 @@ void plat_sound_write(const struct audio_frame *data, int frames)
 	if (sf3000_audio_running) {
 		int in_rate = audio.in_sample_rate > 0
 			? audio.in_sample_rate : audio.out_sample_rate;
-		/* phase step per output sample, 16.16 fixed: in_rate/out_rate */
-		uint32_t step = (uint32_t)(((uint64_t)in_rate << 16) / audio.out_sample_rate);
 		pthread_mutex_lock(&sf3000_aring_mtx);
+		/* Phase step per output sample, 16.16 fixed: in_rate/out_rate.
+		 * The emulation and DAC clocks are independent and differ slightly on
+		 * real units (F-Zero drained a few dozen frames every few seconds despite
+		 * nominally exact rates).  Nudge the existing resampler by only 1/512
+		 * according to queue occupancy.  This keeps the ring centred without an
+		 * extra operation in the per-sample loop or an audible pitch change. */
+		uint32_t step = (uint32_t)(((uint64_t)in_rate << 16) / audio.out_sample_rate);
+		unsigned queued = sf3000_aring_w - sf3000_aring_r;
+		if (queued < SF3000_ARING_FRAMES / 2)
+			step -= step >> 9; /* low queue: stretch by ~0.2% */
+		else if (queued > SF3000_ARING_FRAMES * 3 / 4)
+			step += step >> 9; /* high queue: contract by ~0.2% */
 		for (int i = 0; i < frames; i++) {
 			struct audio_frame cur = data[i];
 			/* emit outputs positioned between prev and cur */
 			while (sf3000_rs_phase < 0x10000) {
 				int frac = sf3000_rs_phase & 0xffff;
 				struct audio_frame out;
-				if (sf3000_aring_w - sf3000_aring_r >= SF3000_ARING_FRAMES)
-					goto ring_full;  /* drop remaining frames */
+				if (sf3000_aring_w - sf3000_aring_r >= SF3000_ARING_FRAMES) {
+					/* Keep the newest audio.  Retaining stale queued samples after a
+					 * slow frame adds latency and eventually makes the discontinuity
+					 * worse when the remainder of this batch is dropped. */
+					sf3000_aring_r += SF3000_ACHUNK;
+					if (++sf3000_overruns <= 8 ||
+					    !(sf3000_overruns & (sf3000_overruns - 1)))
+						dbg_log("DBG A: overrun #%u; dropped %u oldest frames\n",
+						        sf3000_overruns, (unsigned)SF3000_ACHUNK);
+				}
 				/* delta*frac>>16 can exceed int16 (delta up to ±65535) — keep the
 				 * math in int32; the interpolated result itself always lies
 				 * between prev and cur, so only the final value fits int16. */
@@ -1367,7 +1444,6 @@ void plat_sound_write(const struct audio_frame *data, int frames)
 			sf3000_rs_phase -= 0x10000;
 			sf3000_rs_prev = cur;
 		}
-ring_full:
 		pthread_mutex_unlock(&sf3000_aring_mtx);
 	}
 #else

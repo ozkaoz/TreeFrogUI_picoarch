@@ -715,6 +715,9 @@ static const char h_sf3000_volume[] =
 	"Lowers this app's audio output so the system's low\n"
 	"volume steps are actually quiet (the stock volume\n"
 	"curve is loud). 100 = full. Saved to sndgain.txt.";
+static const char h_sf3000_mono[] =
+	"Mix both stereo channels into the handheld's speaker.\n"
+	"Disable only when using stereo-capable external audio.";
 static const char h_sf3000_sharpness[] =
 	"Hardware edge-sharpen for scaled video (0=off, 10=max).\n"
 	"Crisps up the display's bilinear scaling. Per-game.";
@@ -733,6 +736,7 @@ static menu_entry e_menu_video_options[] =
 	mee_onoff_h      ("Optimize text",            0, optimize_text, 1, h_optimize_text),
 	mee_range_h      ("Audio buffer",             0, audio_buffer_size, 1, 15, h_audio_buffer_size),
 #ifdef PLATFORM_SF3000
+	mee_onoff_h      ("Mono output",               0, audio_mono, 1, h_sf3000_mono),
 	mee_range_h      ("Sharpness",     MA_VID_SHARPNESS, sf3000_sharpness, 0, 10, h_sf3000_sharpness),
 	mee_range_h      ("Volume %",                 0, sf3000_snd_gain_pct, 0, 100, h_sf3000_volume),
 #endif

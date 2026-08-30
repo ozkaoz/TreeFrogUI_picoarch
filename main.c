@@ -404,6 +404,7 @@ void set_defaults(void)
 	enable_audio = 1;
 	ff_enabled = 0;       /* off by default; enable per-core in the menu */
 	rewind_enabled = 0;   /* off by default; reserves RAM + slows frames when on */
+	audio_mono = 1;       /* single-speaker SF3000/R36SX default; stereo is optional */
 	audio_buffer_size = 5;
 	scale_size = SCALE_SIZE_ASPECT;  /* default: aspect — integer & full are slower on the HW scaler */
 	aspect_ratio_mode = 1;           /* Native (merged Aspect-ratio control default) */

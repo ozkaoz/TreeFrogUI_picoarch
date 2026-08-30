@@ -270,10 +270,6 @@ static int hwdisp_driver_present(void *src, int w, int h, int pitch) {
     extern int sf3000_is_r36sx(void);
     volatile unsigned int *dbg_ctx = (p_g_render && *p_g_render) ?
         (volatile unsigned int *)*p_g_render : NULL;
-    if (dbg_ctx && !sf3000_is_r36sx())
-        DBG("DBG canvas pre: %u,%u scale_ctx=%u,%u,%u,%u\n",
-            dbg_ctx[0x3294/4], dbg_ctx[0x3290/4], dbg_ctx[0xda8/4],
-            dbg_ctx[0xdac/4], dbg_ctx[0xdb0/4], dbg_ctx[0xdb4/4]);
     /* With the guarded canvas patch enabled, preserve the driver's menu
      * envelope (320x240 is composed through its fixed 640x480 canvas), but
      * program game-sized frames before signalling the render thread. */
@@ -295,10 +291,6 @@ static int hwdisp_driver_present(void *src, int w, int h, int pitch) {
     /* HCFB writes are intentionally disabled: the ioctl accepts the tuple but
      * the current orientation hypothesis squishes both menu and game output.
      * Keep the probe/logging active until the portrait tuple is verified. */
-    if (dbg_ctx && !sf3000_is_r36sx())
-        DBG("DBG canvas post: %u,%u scale_ctx=%u,%u,%u,%u rv=%d\n",
-            dbg_ctx[0x3294/4], dbg_ctx[0x3290/4], dbg_ctx[0xda8/4],
-            dbg_ctx[0xdac/4], dbg_ctx[0xdb0/4], dbg_ctx[0xdb4/4], rv);
     /* The private driver rewrites the canvas during disp_frame().  Update the
      * live canvas after that write so the following frame uses the requested
      * hardware viewport. This is guarded by the existing diagnostic marker. */
@@ -314,7 +306,6 @@ static int hwdisp_driver_present(void *src, int w, int h, int pitch) {
         }
         dbg_ctx[0x3294/4] = ow;
         dbg_ctx[0x3290/4] = oh;
-        fprintf(stderr, "TFDBG context viewport post: src=%dx%d dst=%ux%u\n", w, h, ow, oh);
     }
     return rv;
 }
@@ -603,6 +594,7 @@ static void clear_fb0_for_shutdown(void) {
 }
 
 void hwdisp_set_target_aspect(int num, int den) {
+    int changed = num != g_aspect_num || den != g_aspect_den;
     g_aspect_num = num;
     g_aspect_den = den;
     /* SF3000's HCFB scaler is portrait before the panel's 270-degree
@@ -622,7 +614,7 @@ void hwdisp_set_target_aspect(int num, int den) {
             last_mode = mode;
         }
     }
-    if (!sf3000_is_r36sx() && den > 0) {
+    if (changed && !sf3000_is_r36sx() && den > 0) {
         int out_w = (480 * num + den / 2) / den;
         if (out_w < 1) out_w = 1;
         if (out_w > 854) out_w = 854;
@@ -630,7 +622,7 @@ void hwdisp_set_target_aspect(int num, int den) {
             num, den, out_w);
         fprintf(stderr, "TFDBG target aspect: %d/%d HCFB tuple 640,480,480,%d\n",
                 num, den, out_w);
-    } else {
+    } else if (changed) {
         DBG("DBG target aspect: %d/%d (HCFB probe skipped)\n", num, den);
     }
 }
