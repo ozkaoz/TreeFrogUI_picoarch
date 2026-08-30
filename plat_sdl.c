@@ -26,6 +26,7 @@ static SDL_Surface* screen;
 #include <linux/fb.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
+#include <string.h>
 #include "hwdisp.h"
 
 int sf3000_use_hwdisp = 0;
@@ -53,7 +54,30 @@ extern const int sf3000_keymap_count;
  * and saved to the picoarch config. Every button is surfaced (X/Y/L/R/L2/R2 too),
  * so they can be navigated AND rebound — the old retro_id→key map only covered 7
  * buttons, which is why X/Y couldn't be remapped. */
+
+/* FN physical button support — Feature C1 — R36SX V2.6 CONFIRMED
+ * FN is a PHYSICAL input, NOT a retro virtual action. It maps to SDLK_F11
+ * (SF3000_FN_SDLKEY) and is UNBOUND by default in in_sdl_defbinds.
+ * Raw bit SF3000_FN_BIT=16 (0x00010000) CONFIRMED for R36SX V2.6 via Stock rkgame
+ * disassembly (Witali/r36sx_disasm joykey 0x10000) + Stock setting.xml FN+A/B + matching SHA.
+ * Other devices remain UNKNOWN (wizard shows FN step, physical bit 16 may never occur, no gating).
+ * Visible name "FN" comes from in_sdl_key_names[SDLK_F11] in plat_sf3000.c.
+ */
+int sf3000_has_fn = 0; /* HAS_FN_BUTTON equivalent: 0=NO/UNKNOWN hidden, 1=YES visible */
+static int sf3000_fn_diag = 0; /* diagnostic logging enable */
+
+#ifndef SF3000_FN_BIT
+#define SF3000_FN_BIT 16
+#endif
+#ifndef SF3000_FN_SDLKEY
+#define SF3000_FN_SDLKEY SDLK_F11
+#endif
+
 static SDLKey sf3000_bit_to_sdlkey(int bit) {
+    if (bit == SF3000_FN_BIT) {
+        /* FN is data-driven: if bit16 occurs, surface SDLK_F11 / FN. No gating. */
+        return SF3000_FN_SDLKEY;
+    }
     switch (bit) {
         case 4:  return SDLK_UP;
         case 6:  return SDLK_DOWN;
@@ -71,6 +95,48 @@ static SDLKey sf3000_bit_to_sdlkey(int bit) {
         case 3:  return SDLK_RETURN;     /* START              */
         default: return SDLK_UNKNOWN;
     }
+}
+
+/* Device capability init — called from sf3000_keys_init.
+ * Final model per C1.9 section 16: FN event path is DATA-DRIVEN, not gated.
+ * If bit16 occurs, surface SDLK_F11 / FN. If never occurs, nothing happens.
+ * No fn_enable file required. This init only sets sf3000_has_fn for logging/diagnostics;
+ * it does NOT suppress valid bit16 events (gating removed). For R36SX V2.6, has_fn will be YES
+ * via TF_DEVICE detection, but even if detection fails, FN at bit16 will still be surfaced.
+ * Other devices remain NO in log unless env/file override, but event still not suppressed.
+ */
+static void sf3000_fn_capability_init(void) {
+    sf3000_has_fn = 0;
+    // Auto-detect R36SX for logging (not for gating)
+    const char *tfdev = getenv("TF_DEVICE");
+    if (tfdev && strcmp(tfdev, "R36SX") == 0) sf3000_has_fn = 1;
+    else {
+        FILE *tf = fopen("/tmp/tfdevice.env", "r");
+        if (tf) {
+            char line[128];
+            while (fgets(line, sizeof(line), tf)) {
+                if (strstr(line, "TF_DEVICE=R36SX")) { sf3000_has_fn = 1; break; }
+            }
+            fclose(tf);
+        }
+    }
+    const char *ev = getenv("SF3000_HAS_FN");
+    if (ev && (ev[0]=='1' || ev[0]=='y' || ev[0]=='Y')) sf3000_has_fn = 1;
+    else if (ev && (ev[0]=='0' || ev[0]=='n' || ev[0]=='N')) sf3000_has_fn = 0;
+    FILE *f = fopen("/mnt/sdcard/fn_enable", "r");
+    if (f) { char c; if (fread(&c,1,1,f)==1 && (c=='1'||c=='y'||c=='Y')) sf3000_has_fn=1; else if(c=='0'||c=='n'||c=='N') sf3000_has_fn=0; fclose(f); }
+#ifdef FN_DIAGNOSTIC
+    sf3000_fn_diag = 1;
+#else
+    const char *dv = getenv("FN_DIAG");
+    if (dv && (dv[0]=='1' || dv[0]=='y' || dv[0]=='Y')) sf3000_fn_diag = 1;
+    else {
+        FILE *df = fopen("/mnt/sdcard/fn_diag", "r");
+        if (df) { sf3000_fn_diag = 1; fclose(df); }
+    }
+#endif
+    if (sf3000_has_fn) fprintf(stderr, "SF3000 FN: HAS_FN=YES (bit %d → SDLK_F11 FN, data-driven)\n", SF3000_FN_BIT);
+    else fprintf(stderr, "SF3000 FN: HAS_FN=NO (bit %d FN will still surface if pressed, data-driven, diag=%d)\n", SF3000_FN_BIT, sf3000_fn_diag);
 }
 
 /* Debounce depth: a bit flips state only after this many consecutive samples
@@ -98,16 +164,40 @@ static void *sf3000_input_thread_fn(void *unused) {
             }
         }
         sf3000_keys_filtered = stable;
-        uint32_t cur = stable & 0xFFFF;
+        uint32_t cur = stable & 0x0001FFFFu;
         uint32_t changed = cur ^ prev;
+#ifdef FN_DIAGNOSTIC
+        if (changed) {
+            uint32_t pressed = cur & changed;
+            uint32_t released = (~cur) & changed;
+            fprintf(stderr, "FN_DIAG RAW prev=0x%05X cur=0x%05X changed=0x%05X pressed=0x%05X released=0x%05X bits_pressed:",
+                    prev & 0x1FFFF, cur, changed, pressed, released);
+            for (int b=0;b<17;b++) if (changed & (1u<<b)) fprintf(stderr, " %d", b);
+            fprintf(stderr, "\n");
+            fflush(stderr);
+        }
+#else
+        if (sf3000_fn_diag && changed) {
+            uint32_t pressed = cur & changed;
+            uint32_t released = (~cur) & changed;
+            fprintf(stderr, "FN_DIAG prev=0x%05X cur=0x%05X changed=0x%05X pressed_bits:",
+                    prev & 0x1FFFF, cur, changed);
+            for (int b=0;b<17;b++) if (pressed & (1u<<b)) fprintf(stderr, " %d", b);
+            fprintf(stderr, " released_bits:");
+            for (int b=0;b<17;b++) if (released & (1u<<b)) fprintf(stderr, " %d", b);
+            fprintf(stderr, "\n");
+        }
+#endif
         if (!changed) continue;
-        for (int i = 0; i < sf3000_keymap_count; i++) {
-            uint32_t bit = 1u << sf3000_keymap[i].bit;
-            if (!(changed & bit)) continue;
-            SDLKey k = sf3000_bit_to_sdlkey(sf3000_keymap[i].bit);
+        /* Decoupled physical SDL input: process supported raw bits 0..16 via sf3000_bit_to_sdlkey,
+         * not limited to sf3000_keymap (which is RetroPad only). FN at bit16 → SDLK_F11. */
+        for (int bit = 0; bit <= 16; bit++) {
+            uint32_t mask = 1u << bit;
+            if (!(changed & mask)) continue;
+            SDLKey k = sf3000_bit_to_sdlkey(bit);
             if (k == SDLK_UNKNOWN) continue;
             SDL_Event ev; memset(&ev, 0, sizeof(ev));
-            ev.type = (cur & bit) ? SDL_KEYDOWN : SDL_KEYUP;
+            ev.type = (cur & mask) ? SDL_KEYDOWN : SDL_KEYUP;
             ev.key.keysym.sym = k;
             SDL_PushEvent(&ev);
         }
@@ -117,6 +207,7 @@ static void *sf3000_input_thread_fn(void *unused) {
 }
 
 static void sf3000_keys_init(void) {
+    sf3000_fn_capability_init();
     key_t k = ftok("/tmp/joy_key", 'a');
     if (k == (key_t)-1) { fprintf(stderr, "SF3000 input: ftok failed\n"); return; }
     /* Attach to cubevol's joy_key shm (cubevol reads gpio → writes it). On SF3500
