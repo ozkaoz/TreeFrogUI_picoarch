@@ -232,6 +232,7 @@ static size_t sf3000_fb_size = 0;
 int sf3000_fb_init(void);
 void sf3000_fb_blit(const void *src, int width, int height, int pitch);
 void sf3000_fb_finish(void);
+int sf3000_is_r36sx(void);
 static void sf3000_text_native(int px, int py, const char *text, uint32_t color, int page_y_offset);
 
 #endif
@@ -1870,11 +1871,11 @@ int sf3000_fb_init(void) {
      * reads it (single binary → SF3000 854x480 or R36SX 640x480). */
     { extern void sf3000_detect_device(void); sf3000_detect_device(); }
 
-    /* SF3500: the real (decrypted) driver owns the display — its video_drivers_init
-     * sets fb geometry + dtb rotation correctly (proven by rkgame's own render).
-     * picoarch's FBIOPUT/dis-ioctl/SW-mmap below FIGHTS that HCGE setup → garbled
-     * disp_frame. Skip all of it: load the driver, present only via disp_frame. */
-    if (sf3000_is_sf3500()) {
+    /* SF-class devices are hardware-present only. The stock/decrypted driver
+     * owns the portrait framebuffer geometry and HCGE performs the panel
+     * transform/scaling. Do not touch fb0 with FBIOPUT, mmap it, or fall back
+     * to the legacy software transpose path. */
+    if (!sf3000_is_r36sx()) {
         extern int hwdisp_init(void);
         if (hwdisp_init() == 0) {
             sf3000_use_hwdisp = 1;
@@ -1885,10 +1886,11 @@ int sf3000_fb_init(void) {
             if (dis >= 0) { struct { int a,b,c; } b = {1,0,0}; ioctl(dis, 0xc00c0e0c, &b); close(dis); }
             int fb = open("/dev/fb0", O_RDWR);
             if (fb >= 0) { ioctl(fb, FBIOBLANK, 1); ioctl(fb, FBIOBLANK, 0); close(fb); }
-            fprintf(stderr, "sf3000_fb_init: SF3500 driver owns display, panel on (disp_frame only)\n");
+            fprintf(stderr, "sf3000_fb_init: SF-class hardware display active (disp_frame only)\n");
             return 0;
         }
-        fprintf(stderr, "sf3000_fb_init: SF3500 hwdisp_init failed, falling back\n");
+        fprintf(stderr, "sf3000_fb_init: SF-class hwdisp_init failed; software framebuffer disabled\n");
+        return -1;
     }
     /* Write per-process init log to dedicated file with fsync, so it
      * survives even when stderr buffer is lost on power-cycle. */

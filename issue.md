@@ -8,8 +8,9 @@
 - `driver.so` at `/mnt/sdcard/cubegm/driver.so` — proprietary HCGE compositor. Exports:
   `video_drivers_init()`, `video_driver_deinit()`, `video_driver_disp_frame(src, w, h, pitch)`.
   When active: reconfigures fb0 to 1280×720×16bpp and routes display through its own HW pipeline.
-- **SW path**: direct mmap write to fb0 (portrait 720×1280), per-frame transpose+scale in `sf3000_fb_blit`,
-  FBIOPAN_DISPLAY for double-buffer page flip. Fast, zero lag.
+- **SF3000 presentation**: hardware-only via `driver.so`/HCGE. The legacy
+  mmap/transpose framebuffer path is no longer used on SF3000.
+- **R36SX presentation**: retains its separate direct framebuffer path.
 - **HW path**: driver.so via `hwdisp_init()`. Bilinear = pass src directly to `p_disp`, driver HW-scales to panel.
   2-3 frame input lag. Smooth.
 
@@ -28,7 +29,7 @@ Tried and ruled out as the cause:
 - `fork()` prime in child process
 - 854×480 → 320×180 downscale before `p_disp`
 
-Why games work: games are *never* the first process. icube launches FrogUI first (SW path).
+Why games work: games are *never* the first process. icube launches FrogUI first.
 Then FrogUI execs to the game process via `quit()` — **same PID**, kernel-side state primed by
 FrogUI's prior fb0 activity.
 
@@ -53,7 +54,7 @@ Functional: FrogUI renders correctly, no squish.
 
 - Game's `quit()` → marker written → `execl` FrogUI → marker read → `hwdisp_init` succeeds
   because the kernel session has already had successful `p_disp` calls (during the game).
-- Cold boot FrogUI → no marker → SW path. Normal.
+- Cold boot FrogUI → hardware driver is initialized before the first frame.
 - Cold boot game (impossible — icube always launches FrogUI first).
 
 ## Files involved
@@ -66,7 +67,8 @@ Functional: FrogUI renders correctly, no squish.
 
 ## Hard constraints (do not break)
 
-- Cold-boot FrogUI must use SW path (driver.so first p_disp hangs).
+- SF3000 must remain hardware-only; if `hwdisp_init()` fails, startup fails
+  instead of falling back to software framebuffer writes.
 - Marker check must verify `getppid()` to avoid acting on stale marker from prior reboot
   (`/tmp` may persist on some kernels).
 - FrogUI's HW path: must use `filter=0`, no aspect padding. `filter=1` (nearest SW-upscale)
