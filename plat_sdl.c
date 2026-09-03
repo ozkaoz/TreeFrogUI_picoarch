@@ -1077,6 +1077,23 @@ int  sf3000_snd_gain_pct = 100;          /* menu edits this (extern in menu.c) *
 static int sf3000_snd_gain_q8 = 256;     /* 8.8 fixed derived value (256 = 1.0) */
 #define SF3000_SNDGAIN_PATH "/mnt/sdcard/cubegm/sndgain.txt"
 
+/* cubevol's live I2SO volume control, reverse-engineered from its
+ * api_set_volume().  Software-zeroed PCM still leaves the DAC/amp live and
+ * can hiss, so Volume 0 must also silence this hardware path. */
+#define SF3000_I2SO_SET_VOLUME 0x8001080bu
+static void sf3000_i2so_set_volume(int level)
+{
+	unsigned char value;
+	int fd;
+	if (level < 0) level = 0;
+	if (level > 100) level = 100;
+	value = (unsigned char)level;
+	fd = open("/dev/sndC0i2so", O_WRONLY);
+	if (fd < 0) return;
+	(void)ioctl(fd, SF3000_I2SO_SET_VOLUME, &value);
+	close(fd);
+}
+
 /* Recompute the live gain from the percent and persist it. Called from the menu. */
 void sf3000_apply_snd_gain(void) {
 	if (sf3000_snd_gain_pct < 0)   sf3000_snd_gain_pct = 0;
@@ -1415,6 +1432,12 @@ static int plat_sound_init(void)
 
 	/* Start the non-blocking audio consumer thread (it init's the DAC itself). */
 	sf3000_load_snd_gain();   /* re-read cubegm/sndgain.txt each game launch */
+	/* The frontend volume setting is normally a software gain so it preserves
+	 * the stock hardware curve.  At exactly zero, also close the analogue path:
+	 * otherwise a "muted" game can still emit DAC/amp white noise. FrogUI
+	 * restores the saved hardware level before every non-muted game launch. */
+	if (sf3000_snd_gain_pct == 0)
+		sf3000_i2so_set_volume(0);
 	sf3000_aring_w = sf3000_aring_r = 0;
 	sf3000_underruns = sf3000_overruns = 0;
 	sf3000_rs_phase = 0;
@@ -1682,9 +1705,15 @@ int plat_init(void)
     }
     in_probe();
 
-    if (plat_sound_init()) {
+    /* FrogUI is a launcher.  Do not power the proprietary DAC for it: the
+       analogue output can hiss even with no samples and a UI volume of zero.
+       Games run in a fresh PicoArch exec and initialise audio normally. */
+    extern int g_is_frogui;
+    if (!g_is_frogui && plat_sound_init()) {
         PA_ERROR("SF3000 SDL sound failed to init (continuing without audio): %s\n", SDL_GetError());
     }
+    if (g_is_frogui)
+        PA_INFO("SF3000: audio DAC disabled for FrogUI launcher\n");
 
 dbg_log("DBG M3: sound init done\n");
     sf3000_keys_init();

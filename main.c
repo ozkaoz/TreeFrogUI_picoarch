@@ -977,6 +977,12 @@ int main(int argc, char **argv) {
 		}
 	}
 
+	/* FrogUI is PicoArch's launcher core, not a game.  Establish this before
+	 * plat_init(): the SF3000 audio driver powers the DAC independently of
+	 * software volume, so starting it for the launcher leaves audible analogue
+	 * noise even when FrogUI's volume setting is zero. */
+	g_is_frogui = argc > 1 && argv[1] && strcmp(argv[1], FROGUI_CORE) == 0;
+
 	if (plat_init()) {
 		quit(-1);
 	}
@@ -1057,7 +1063,6 @@ int main(int argc, char **argv) {
 
 	/* Hide cubevol's battery/volume OSD (/dev/fb1) during gameplay. Skipped
 	 * for FrogUI (the menu core) so the menu still shows battery. */
-	g_is_frogui = (strcmp(core_path, FROGUI_CORE) == 0);
 	if (!g_is_frogui) fb1_blank(1);
 
 	load_config_keys();
@@ -1234,6 +1239,13 @@ int quit(int code) {
 			execl(next_bin, "picoarch", core_path, rom_path, NULL);
 			DBG("DBG exec game FAILED: errno=%d (%s)\n", errno, strerror(errno));
 		}
+	}
+	/* A game hands off to FrogUI with exec(), so normal plat_finish() is not
+	 * reached.  Stop the game DAC before that handoff; FrogUI deliberately does
+	 * not initialise it, preventing idle hiss/static in the main menu. */
+	{
+		extern void sf3000_sound_finish_for_exec(void);
+		sf3000_sound_finish_for_exec();
 	}
 	DBG("DBG exec FrogUI fallback: bin=%s\n", PICOARCH_BIN);
 	execl(PICOARCH_BIN, "picoarch", FROGUI_CORE, FROGUI_CORE, NULL);
