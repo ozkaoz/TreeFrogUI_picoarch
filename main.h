@@ -7,6 +7,11 @@
 
 #define MAX_PATH 512
 
+/* The FrogUI launcher core. Defined here so plat_sdl.c's audio thread can
+ * detect a launcher boot and defer opening the stock DAC (idle-static fix:
+ * an open unfed AUDDEC/I2SO loops audible noise even at volume 0). */
+#define FROGUI_CORE "/mnt/sdcard/cubegm/cores/frogui_libretro.so"
+
 typedef enum {
   EACTION_NONE = 0,
   EACTION_MENU,

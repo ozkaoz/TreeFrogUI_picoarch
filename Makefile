@@ -72,7 +72,7 @@ else ifeq ($(platform), miyoomini)
 	MMENU=1
 	PATCH=patch
 else ifeq ($(platform), sf3000)
-	OBJS += plat_sf3000.o hwdisp.o
+	OBJS += plat_sf3000.o hwdisp.o cubevol_audio.o
 	CFLAGS += -mips32r2 -march=mips32r2 -mtune=24kc -mfp32 -mhard-float -DCONTENT_DIR='"/mnt/SDCARD/Roms"' -DUSE_C_SCALER -DPLATFORM_SF3000
 	# Panel geometry is detected at runtime (SF3000 854x480 / R36SX 640x480) —
 	# see sf3000_detect_device() in plat_sdl.c. No compile-time panel defines.
@@ -138,6 +138,9 @@ plat_linux.o: plat_sdl.c
 plat_sf3000.o: plat_sdl.c
 
 hwdisp.o: hwdisp.c hwdisp.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+cubevol_audio.o: cubevol_audio.c cubevol_audio.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(BIN): libpicofe/.patched $(OBJS)

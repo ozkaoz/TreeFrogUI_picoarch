@@ -21,6 +21,7 @@ static SDL_Surface* screen;
 #ifdef PLATFORM_SF3000
 #include <fcntl.h>
 #include <errno.h>
+#include <arpa/inet.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 #include <linux/fb.h>
@@ -28,6 +29,7 @@ static SDL_Surface* screen;
 #include <sys/shm.h>
 #include <string.h>
 #include "hwdisp.h"
+#include "cubevol_audio.h"
 
 int sf3000_use_hwdisp = 0;
 
@@ -673,6 +675,8 @@ static void video_print_msg(uint16_t *dst, uint32_t h, uint32_t pitch, char *msg
 	basic_text_out16_nf(dst, pitch, 2, h - 10, msg);
 }
 
+#ifndef PLATFORM_SF3000
+/* Nearest-neighbour resampler for the SDL audio path (non-SF3000 builds). */
 static int audio_resample_nearest(struct audio_frame data) {
 	static int diff = 0;
 	int consumed = 0;
@@ -691,6 +695,7 @@ static int audio_resample_nearest(struct audio_frame data) {
 
 	return consumed;
 }
+#endif
 
 static void *fb_flip(void)
 {
@@ -1038,6 +1043,8 @@ finish:
 	return ticks;
 }
 
+#ifndef PLATFORM_SF3000
+/* SDL audio callback (non-SF3000 builds). */
 static void plat_sound_callback(void *unused, uint8_t *stream, int len)
 {
 	int16_t *p = (int16_t *)stream;
@@ -1062,6 +1069,7 @@ static void plat_sound_callback(void *unused, uint8_t *stream, int len)
 		--len;
 	}
 }
+#endif
 
 #ifdef PLATFORM_SF3000
 static void *sf3000_sound_handle = NULL;
@@ -1122,6 +1130,143 @@ static struct audio_frame sf3000_rs_prev;       /* previous input frame */
 
 static volatile int sf3000_audio_init_rc = 0;   /* 0=pending, 1=ok, -1=failed */
 
+/* Idle-static fix: the launcher process (FrogUI core) never produces audio.
+ * Storing argv[1] (the core path) before plat_init() lets the audio thread
+ * skip the initial DAC open; without this the stock AUDDEC/I2SO sits open
+ * and unfed in every menu session, looping its audible idle noise. */
+const char *sf3000_boot_core_path = NULL;
+static int g_is_frogui_deferred_dac(void) {
+	return sf3000_boot_core_path &&
+	       strcmp(sf3000_boot_core_path, FROGUI_CORE) == 0;
+}
+
+/* Speaker mute line (idle-static fix, v16): the console's speaker-amp mute
+ * is a GPIO driven with INVERTED polarity from what the DT name suggests.
+ * Ground truth from the AMPMON4 register capture (plug/unplug transitions):
+ *   - idle, static hissing:  GPIO_L bit 19 (0x80000) CLEAR  (out=0x340)
+ *   - headphones plugged, speaker silent: bit 19 SET (out=0x80340) - and it
+ *     STAYS set while the plug is in; clear again on unplug, static returns
+ *   - the v8 scan window that restored bit 19 HIGH was the one the user
+ *     reported as "the static stopped"
+ * So HIGH = speaker muted, LOW = speaker live - cubevol asserts it during
+ * HP-plugged sessions and the firmware AVP toggles the same pad through its
+ * I2S pinmux sequences (tristate/idle). Earlier builds only ever drove it
+ * LOW (a no-op - it was already low), which is why every gate attempt
+ * failed while the plug test worked.
+ *
+ * While no audio flows (launcher menu, pause menu, loading stalls) we hold
+ * the line HIGH (muted). On playback we drive it LOW (live) with a small
+ * lead-in so the amp settles before the first sample. The pad is configured
+ * as OUTPUT first (kernel boot leaves it input; cubevol's gpio_configure
+ * does the same at daemon start). If the DT pin is missing/odd, or the
+ * option file mutespkr.txt says "off", the stock behaviour is kept. */
+static volatile uint32_t *sf3000_gpioL_regs = NULL;   /* GPIO_L bank map */
+static int sf3000_mute_pin = -1;                       /* DT /panel/speaker-output */
+static int sf3000_spk_mute_state = -1;                 /* -1 unknown, 0 live, 1 muted */
+static int sf3000_mute_enabled = -1;                   /* -1 = read once from SD */
+
+/* Speaker-live grace: how long the speaker stays unmuted after the last REAL
+ * audio chunk was consumed. Playback keeps the line LOW only while real
+ * audio flows (or is about to); once the grace expires with nothing but
+ * concealment/idle, the line goes HIGH and the amp hiss is gone. 300ms
+ * covers core-emulation burst gaps without audible gating; the launcher's
+ * menu ticks re-arm it on every press. */
+#define SF3000_SPK_LIVE_GRACE_MS 300
+
+/* CLOCK_MONOTONIC microseconds - used by the speaker-live grace window. */
+static uint64_t sf3000_now_us(void) {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+}
+
+static int sf3000_spk_mute_map(void) {
+	if (sf3000_gpioL_regs) return 0;
+	if (sf3000_mute_enabled < 0) {
+		/* opt-out switch: cubegm/mutespkr.txt containing "off" disables the
+		 * gate entirely (users who prefer the stock behaviour). */
+		sf3000_mute_enabled = 1;
+		FILE *f = fopen("/mnt/sdcard/cubegm/mutespkr.txt", "r");
+		if (f) {
+			char b[8] = {0};
+			if (fgets(b, sizeof b, f) && strncmp(b, "off", 3) == 0)
+				sf3000_mute_enabled = 0;
+			fclose(f);
+		}
+		if (sf3000_mute_enabled)
+			dbg_log("DBG A: speaker mute gate ENABLED (no mutespkr.txt switch)\n");
+		else
+			dbg_log("DBG A: speaker mute gate DISABLED by mutespkr.txt\n");
+	}
+	if (!sf3000_mute_enabled) return 1;   /* disabled: treat as mapped-noop */
+
+	/* resolve the DT pin once */
+	if (sf3000_mute_pin < 0) {
+		char buf[16];
+		int fd = open("/proc/device-tree/panel/speaker-output", O_RDONLY);
+		if (fd < 0) return -1;
+		int n = read(fd, buf, sizeof(buf) - 1);
+		close(fd);
+		if (n < 4) { sf3000_mute_pin = -2; return -1; }   /* -2: missing for good */
+		uint32_t v;
+		memcpy(&v, buf, 4);
+		v = ntohl(v);
+		if (v >= 128 || (v >> 5) != 0) { sf3000_mute_pin = -2; return -1; }
+		sf3000_mute_pin = (int)(v & 0x1f);
+	}
+
+	int fd = open("/dev/mem", O_RDWR | O_SYNC);
+	if (fd < 0) return -1;
+	void *m = mmap(NULL, 0x2020, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
+	               0x18800000);
+	close(fd);
+	if (m == MAP_FAILED) return -1;
+	sf3000_gpioL_regs = (volatile uint32_t *)((char *)m + 0x44);
+	return 0;
+}
+
+/* drive the speaker mute line: mute=1 -> pad HIGH (speaker silent),
+ * mute=0 -> pad LOW (speaker live). Safe no-op when unavailable. */
+static void sf3000_spk_mute(int mute) {
+	if (sf3000_spk_mute_map() != 0) return;
+	uint32_t bit = 1u << sf3000_mute_pin;
+	/* direction +0x14: OUTPUT (bit set) before driving the value */
+	if (!(sf3000_gpioL_regs[5] & bit))
+		sf3000_gpioL_regs[5] |= bit;
+	if (mute) {
+		if (sf3000_spk_mute_state == 1) return;
+		sf3000_gpioL_regs[4] |= bit;    /* +0x10: HIGH = muted (AMPMON4 truth) */
+		sf3000_spk_mute_state = 1;
+	} else {
+		if (sf3000_spk_mute_state == 0) return;
+		sf3000_gpioL_regs[4] &= ~bit;  /* LOW = live */
+		sf3000_spk_mute_state = 0;
+	}
+}
+
+/* SILENCE-BASE SPEAKER POLICY: the line is LOW (live) only while real audio
+ * has flowed within the grace window - every menu tick, every game burst
+ * re-arms it. Once the grace expires (launcher idle after a tick, muted
+ * cutscene, loading stall) the line goes HIGH and the amp hiss is gone for
+ * good until the next sound. The 10ms lead-in on the muted->live transition
+ * lets the amp settle before the first sample (speed_fade=5 in the DT).
+ * Called once per consumer-thread cycle. */
+static void sf3000_spk_live_gate(uint64_t last_real_us) {
+	int want_live = last_real_us != 0 &&
+		(sf3000_now_us() - last_real_us) <
+			(uint64_t)SF3000_SPK_LIVE_GRACE_MS * 1000u;
+	if (want_live && sf3000_spk_mute_state != 0) {
+		sf3000_spk_mute(0);
+		if (sf3000_spk_mute_state == 0) {
+			dbg_log("DBG A: audio flows; speaker line LOW\n");
+			usleep(10 * 1000);
+		}
+	} else if (!want_live && sf3000_spk_mute_state != 1) {
+		sf3000_spk_mute(1);
+		dbg_log("DBG A: audio idle; speaker line HIGH (silent)\n");
+	}
+}
+
 /* AUDDEC/I2SO can survive a process transition in a half-alive state: init
  * reports success, but no samples reach the speaker until another application
  * (notably pcsx4all) opens and closes the driver. Keep every operation on the
@@ -1162,6 +1307,7 @@ static void *sf3000_audio_thread_fn(void *unused)
 	int primed = 0;
 	int driver_active = 0;
 	int recovering = 0;
+	uint64_t last_real_us = 0;   /* last consumed REAL audio (CLOCK_MONOTONIC) */
 	struct audio_frame last = { 0, 0 };
 
 	/* Init the DAC ON THIS THREAD. The SF3500/HD/SF3100 driver keeps its audio
@@ -1176,17 +1322,38 @@ static void *sf3000_audio_thread_fn(void *unused)
 	/* A previous core can leave AUDDEC/I2SO busy for considerably longer than
 	 * the normal 100 ms settle window. Keep the consumer alive and retry rather
 	 * than permanently silencing the session; this is the same recovery users
-	 * previously triggered by launching and exiting PCSX4ALL. */
-	while (sf3000_audio_running && sf3000_audio_driver_start(1) < 0) {
-		PA_ERROR("SF3000: sound_driver_init failed; retrying audio startup\n");
-		dbg_log("DBG A: sound_driver_init failed; retry in 250ms\n");
-		sf3000_audio_init_rc = -1;
-		usleep(250 * 1000);
+	 * previously triggered by launching and exiting PCSX4ALL.
+	 *
+	 * SPEAKER MUTE GATE: mute the line FIRST, before any driver startup -
+	 * the boot jingle window already hisses otherwise. Unmuted only when
+	 * playback actually starts (first chunk in the loop below). */
+	sf3000_spk_mute(1);
+	if (!g_is_frogui_deferred_dac()) {
+		while (sf3000_audio_running && sf3000_audio_driver_start(1) < 0) {
+			PA_ERROR("SF3000: sound_driver_init failed; retrying audio startup\n");
+			dbg_log("DBG A: sound_driver_init failed; retry in 250ms\n");
+			sf3000_audio_init_rc = -1;
+			usleep(250 * 1000);
+		}
+		if (!sf3000_audio_running)
+			return NULL;
+		driver_active = 1;
+		sf3000_audio_init_rc = 1;
+	} else {
+		/* Launcher: the menu plays nothing. Open the DAC with the normal
+		 * clean cycle (PSX-recovery-proof state); the speaker stays muted
+		 * the whole session - re-asserted every idle cycle. */
+		while (sf3000_audio_running && sf3000_audio_driver_start(1) < 0) {
+			dbg_log("DBG A: launcher startup failed; retry in 250ms\n");
+			sf3000_audio_init_rc = -1;
+			usleep(250 * 1000);
+		}
+		if (!sf3000_audio_running)
+			return NULL;
+		driver_active = 1;
+		sf3000_audio_init_rc = 1;
+		dbg_log("DBG A: launcher boot; speaker mute line held HIGH\n");
 	}
-	if (!sf3000_audio_running)
-		return NULL;
-	driver_active = 1;
-	sf3000_audio_init_rc = 1;
 
 	while (sf3000_audio_running) {
 		int have_chunk = 0;
@@ -1198,6 +1365,10 @@ static void *sf3000_audio_thread_fn(void *unused)
 			next_us = 0;
 			recovering = 0;
 			last.left = last.right = 0;
+			/* Pause menu: nothing plays here. The grace gate mutes the
+			 * speaker ~300ms after the last real audio (a long in-game
+			 * cutscene gap behaves identically), re-asserted every cycle. */
+			sf3000_spk_live_gate(last_real_us);
 			usleep(2000);
 			continue;
 		}
@@ -1218,6 +1389,8 @@ static void *sf3000_audio_thread_fn(void *unused)
 			primed = 1;
 		if (primed) {
 			unsigned take = avail < SF3000_ACHUNK ? avail : SF3000_ACHUNK;
+			if (take)
+				last_real_us = sf3000_now_us();   /* real audio flowed */
 			for (unsigned i = 0; i < take; i++) {
 				chunk[i] = sf3000_aring[sf3000_aring_r & SF3000_ARING_MASK];
 				sf3000_aring_r++;
@@ -1269,9 +1442,17 @@ static void *sf3000_audio_thread_fn(void *unused)
 		pthread_mutex_unlock(&sf3000_aring_mtx);
 
 		if (!have_chunk) {
-			usleep(2000);  /* underrun: wait for the emu thread to refill */
+			/* Idle (menu / loading): the grace gate keeps the speaker line
+			 * HIGH once real audio stops flowing - re-asserted every cycle
+			 * so a cubevol HP or volume event between polls cannot unmute
+			 * the hiss. */
+			sf3000_spk_live_gate(last_real_us);
+			usleep(2000);
 			continue;
 		}
+
+		/* silence-base speaker gate - see sf3000_spk_live_gate */
+		sf3000_spk_live_gate(last_real_us);
 
 		/* Software output gain (volume-curve workaround). The stock level→volume
 		 * mapping is linear, so low system-volume settings stay loud. Scaling our
@@ -1805,6 +1986,12 @@ void plat_finish(void)
 // SF3000 framebuffer implementation
 #ifdef PLATFORM_SF3000
 
+/* device-id probes - defined at the bottom of this section; forward-declared
+ * for the early plat_init paths that need them */
+int sf3000_is_r36sx(void);
+int sf3000_is_sf3500(void);
+int sf3000_is_gb350(void);
+
 /* Phase-A diagnostic: dump state of fb0/fb6/fb22 at any moment so we can
  * see which layers driver.so leaves enabled and whether display routing
  * stays on fb0 or shifts to a HW layer. */
@@ -1838,7 +2025,7 @@ void sf3000_dump_fb_state(const char *tag) {
 
 int sf3000_fb_init(void) {
     /* Detect device + export panel geometry to env before the core's retro_init
-     * reads it (single binary → SF3000 854x480 or R36SX 640x480). */
+      * reads it (single binary → SF3000 854x480 or R36SX 640x480). */
     { extern void sf3000_detect_device(void); sf3000_detect_device(); }
 
     /* SF3500: the real (decrypted) driver owns the display — its video_drivers_init
@@ -2731,7 +2918,6 @@ if (sf3000_use_hwdisp) {
 
     static uint32_t row_cache[180];
     static int last_fb_y_off = -1, last_fb_y_len = -1;
-    int prev_gx = -1;
 
     /* Cycle between page 0 and page 1 for double buffering */
     sf3000_current_page = (sf3000_current_page + 1) % 2;

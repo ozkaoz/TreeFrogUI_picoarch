@@ -117,11 +117,13 @@ static void sf3000_hcge_set_state_hook(void *ctx, void *state, unsigned int acce
             /* The state is the post-rotation landscape destination. */
             unsigned int sw = s[0x90/4], sh = s[0x94/4];
             int nx = sw ? 854 / (int)sw : 1, ny = sh ? 480 / (int)sh : 1;
-            int mul = nx < ny ? nx : ny; if (mul < 1) mul = 1;
+            int mul = nx < ny ? nx : ny;
+            if (mul < 1) mul = 1;
             ow = (int)sw * mul; oh = (int)sh * mul;
         } else if (g_panel_scale == 1 && g_aspect_num > 0 && g_aspect_den > 0) {
             ow = (480 * g_aspect_num + g_aspect_den / 2) / g_aspect_den;
-            if (ow < 1) ow = 1; if (ow > 854) ow = 854;
+            if (ow < 1) ow = 1;
+            if (ow > 854) ow = 854;
         }
         s[0xb0/4] = (unsigned int)((854 - ow) / 2);
         s[0xb4/4] = (unsigned int)((480 - oh) / 2);
@@ -224,18 +226,6 @@ static void hwdisp_probe_hcfb_scale(void) {
     close(fd);
 }
 
-static void hwdisp_apply_hcfb_scale(int num, int den) {
-    int fd = open("/dev/fb0", O_RDWR);
-    if (fd < 0 || den <= 0) { if (fd >= 0) close(fd); return; }
-    int out_w = (480 * num + den / 2) / den;
-    if (out_w < 1) out_w = 1;
-    if (out_w > 854) out_w = 854;
-    struct sf3000_hcfb_scale s = { 640, 480, 480, (uint16_t)out_w };
-    int rc = ioctl(fd, HCFBIOSET_SCALE, &s);
-    DBG("DBG HCFB aspect-post: target=%d/%d landscape=%dx480 ret=%d errno=%d\n",
-        num, den, out_w, rc, errno);
-    close(fd);
-}
 
 static void hwdisp_raw_viewport(int src_w, int src_h, int pitch) {
     extern int sf3000_is_r36sx(void);
@@ -243,7 +233,8 @@ static void hwdisp_raw_viewport(int src_w, int src_h, int pitch) {
     int out_w = 854, out_h = 480;
     if (g_panel_scale == 0) { /* Integer: largest exact source multiple. */
         int n = 854 / src_w, ny = 480 / src_h;
-        if (ny < n) n = ny; if (n < 1) n = 1;
+        if (ny < n) n = ny;
+        if (n < 1) n = 1;
         out_w = src_w * n; out_h = src_h * n;
     } else if (g_panel_scale == 1 && g_aspect_num > 0 && g_aspect_den > 0) {
         out_h = 480;
@@ -277,8 +268,16 @@ static int hwdisp_driver_present(void *src, int w, int h, int pitch) {
         p_g_render && *p_g_render && !sf3000_is_r36sx()) {
         int ow = 854, oh = 480;
         if ((w == 320 && h == 240) || (w == 854 && h == 480)) { ow = 640; oh = 480; }
-        if (g_panel_scale == 0) { int n = 854 / w, ny = 480 / h; if (ny < n) n = ny; if (n < 1) n = 1; ow = w*n; oh = h*n; }
-        else if (g_panel_scale == 1 && g_aspect_num > 0 && g_aspect_den > 0) { ow = (480*g_aspect_num + g_aspect_den/2)/g_aspect_den; if (ow < 1) ow = 1; if (ow > 854) ow = 854; }
+        if (g_panel_scale == 0) {
+            int n = 854 / w, ny = 480 / h;
+            if (ny < n) n = ny;
+            if (n < 1) n = 1;
+            ow = w * n; oh = h * n;
+        } else if (g_panel_scale == 1 && g_aspect_num > 0 && g_aspect_den > 0) {
+            ow = (480 * g_aspect_num + g_aspect_den / 2) / g_aspect_den;
+            if (ow < 1) ow = 1;
+            if (ow > 854) ow = 854;
+        }
         volatile unsigned int *ctx = (volatile unsigned int *)*p_g_render;
         ctx[0x3294/4] = (unsigned int)ow; ctx[0x3290/4] = (unsigned int)oh;
         DBG("DBG experimental viewport-pre: src=%dx%d dst=%dx%d\n", w, h, ow, oh);
@@ -298,11 +297,14 @@ static int hwdisp_driver_present(void *src, int w, int h, int pitch) {
         access("/mnt/sdcard/hcge_canvas_patch.flag", F_OK) == 0) {
         unsigned ow = 854, oh = 480;
         if (g_panel_scale == 0) {
-            int n = 854 / w, ny = 480 / h; if (ny < n) n = ny; if (n < 1) n = 1;
+            int n = 854 / w, ny = 480 / h;
+            if (ny < n) n = ny;
+            if (n < 1) n = 1;
             ow = (unsigned)(w * n); oh = (unsigned)(h * n);
         } else if (g_panel_scale == 1 && g_aspect_num > 0 && g_aspect_den > 0) {
             ow = (unsigned)((480 * g_aspect_num + g_aspect_den / 2) / g_aspect_den);
-            if (ow < 1) ow = 1; if (ow > 854) ow = 854;
+            if (ow < 1) ow = 1;
+            if (ow > 854) ow = 854;
         }
         dbg_ctx[0x3294/4] = ow;
         dbg_ctx[0x3290/4] = oh;
@@ -310,47 +312,10 @@ static int hwdisp_driver_present(void *src, int w, int h, int pitch) {
     return rv;
 }
 
-static void hwdisp_patch_sf3000_canvas_stores(void) {
-    extern int sf3000_is_r36sx(void);
-    if (sf3000_is_r36sx() || !p_disp) return;
-    if (access("/mnt/sdcard/hcge_canvas_patch.flag", F_OK) != 0) {
-        DBG("DBG canvas patch: disabled (create hcge_canvas_patch.flag to test)\n");
-        return;
-    }
-    /* driver.so 1.0.0: video_driver_disp_frame+0xa8/+0xb0 are the stores
-     * that unconditionally write 640 and 480 into the live HCGE canvas. */
-    volatile uint32_t *a = (volatile uint32_t *)((unsigned char *)p_disp + 0xa8);
-    volatile uint32_t *b = (volatile uint32_t *)((unsigned char *)p_disp + 0xb0);
-    if (*a != 0xae823294u || *b != 0xafc23290u) {
-        DBG("DBG canvas patch: signature mismatch %08x/%08x\n", *a, *b); return;
-    }
-    long ps = sysconf(_SC_PAGESIZE); if (ps <= 0) ps = 4096;
-    uintptr_t page = (uintptr_t)a & ~((uintptr_t)ps - 1);
-    if (mprotect((void *)page, (size_t)ps, PROT_READ|PROT_WRITE|PROT_EXEC) != 0) return;
-    *a = 0; *b = 0;
-    __builtin___clear_cache((char *)a, (char *)b + sizeof(*b));
-    mprotect((void *)page, (size_t)ps, PROT_READ|PROT_EXEC);
-    DBG("DBG canvas patch: disabled hardcoded 640x480 stores\n");
-}
 
 /* SF3000's stock generic game branch hardcodes a 640x480 virtual surface.
  * Change only that immediate on the known 854x480 driver so HCGE scales core
  * frames directly on the native panel surface. */
-static void hwdisp_patch_sf3000_game_surface(void) {
-    extern int sf3000_is_r36sx(void), sf3000_is_sf3500(void);
-    extern int sf3000_panel_w(void), sf3000_panel_h(void);
-    if (sf3000_is_r36sx() || sf3000_is_sf3500() || sf3000_panel_w() != 854 || sf3000_panel_h() != 480 || !p_disp) return;
-    volatile uint32_t *ins = (volatile uint32_t *)((unsigned char *)p_disp + 0x9c);
-    if (*ins != 0x24020280u) { DBG("DBG sf3000 driver patch: signature mismatch old=0x%08x\n", *ins); return; }
-    long ps = sysconf(_SC_PAGESIZE); if (ps <= 0) ps = 4096;
-    uintptr_t page = (uintptr_t)ins & ~((uintptr_t)ps - 1);
-    if (mprotect((void *)page, (size_t)ps, PROT_READ|PROT_WRITE|PROT_EXEC) != 0) return;
-    *ins = 0x24020356u;
-    __builtin___clear_cache((char *)ins, (char *)ins + sizeof(*ins));
-    mprotect((void *)page, (size_t)ps, PROT_READ|PROT_EXEC);
-    g_native_game_surface = 1;
-    DBG("DBG sf3000 driver patch: generic game surface 640 -> 854 (HCGE)\n");
-}
 
 int hwdisp_native_game_surface(void) { return g_native_game_surface; }
 
@@ -402,7 +367,6 @@ static uint16_t *g_near_buf = NULL;
 
 static int g_aspect_num = 0;
 static int g_aspect_den = 0;
-static int g_hcfb_w = -1;
 static int g_filter_nearest = 0;   /* SW-scale path (true nearest OR sharp) */
 static int g_filter_sharp   = 0;   /* sharp variant: integer prescale + HW residual */
 
@@ -411,81 +375,13 @@ static int g_filter_sharp   = 0;   /* sharp variant: integer prescale + HW resid
  * controller to scale fb0 → physical panel (640x480), rotate:0. The panel scans
  * fb0 continuously, so we present by writing RGB565 straight into fb0 — no
  * video_driver_disp_frame (which hard-hangs on the engine sync on this driver). */
-static int       g_fbfd    = -1;
-static uint16_t *g_fbmem   = NULL;
-static int       g_fbw     = 0;   /* fb visible width  (px) */
-static int       g_fbh     = 0;   /* fb visible height (px) */
-static int       g_fbstride= 0;   /* fb row stride     (px) */
-static long      g_fbsize  = 0;   /* mmap length (bytes) */
 
-static void hwdisp_fb_open(void) {
-    struct fb_var_screeninfo vi;
-    struct fb_fix_screeninfo fi;
-    g_fbfd = open("/dev/fb0", O_RDWR);
-    if (g_fbfd < 0) { DBG("DBG fbwrite: open fb0 failed\n"); return; }
-    if (ioctl(g_fbfd, FBIOGET_VSCREENINFO, &vi) < 0 ||
-        ioctl(g_fbfd, FBIOGET_FSCREENINFO, &fi) < 0) {
-        DBG("DBG fbwrite: ioctl GET info failed\n");
-        close(g_fbfd); g_fbfd = -1; return;
-    }
-    g_fbw      = vi.xres;
-    g_fbh      = vi.yres;
-    g_fbstride = fi.line_length / 2;       /* bytes → px (RGB565) */
-    g_fbsize   = fi.smem_len;
-    g_fbmem = (uint16_t *)mmap(NULL, g_fbsize, PROT_READ|PROT_WRITE, MAP_SHARED, g_fbfd, 0);
-    if (g_fbmem == MAP_FAILED) {
-        DBG("DBG fbwrite: mmap failed\n");
-        g_fbmem = NULL; close(g_fbfd); g_fbfd = -1; return;
-    }
-    DBG("DBG fbwrite: fb0 %dx%d stride=%dpx bpp=%d size=%ld OK\n",
-        g_fbw, g_fbh, g_fbstride, vi.bits_per_pixel, g_fbsize);
-}
 
 /* Write src(w×h RGB565) directly to fb0, nearest-scaled to fill it.
  *   R36SX: landscape fb, rotate:0 → straight scale.
  *   SF3000: panel is 480x854 portrait-mounted; the driver's disp_frame normally
  *           rotates 90°, but we bypass it, so rotate the frame 90° CW here.
  * Returns 1 if drawn. */
-static int hwdisp_fb_present(const void *src, int w, int h, int pitch_bytes) {
-    if (!g_fbmem || g_fbw <= 0 || g_fbh <= 0 || w <= 0 || h <= 0) return 0;
-    extern int sf3000_is_r36sx(void);
-    const int sp = pitch_bytes / 2;
-    const uint16_t *s = (const uint16_t *)src;
-    int draw_w = g_fbw < 2048 ? g_fbw : 2048;
-
-    if (!sf3000_is_r36sx()) {
-        /* SF3000: 90° CW rotate. fb row → src x; fb col(reversed) → src y. */
-        static int symap[2048];
-        static int last_h = -1, last_fbw = -1;
-        if (h != last_h || g_fbw != last_fbw) {
-            for (int dx = 0; dx < draw_w; dx++) symap[dx] = (h - 1) - (dx * h / g_fbw);
-            last_h = h; last_fbw = g_fbw;
-        }
-        for (int dy = 0; dy < g_fbh; dy++) {
-            int sx = dy * w / g_fbh;
-            uint16_t *drow = g_fbmem + (size_t)dy * g_fbstride;
-            for (int dx = 0; dx < draw_w; dx++)
-                drow[dx] = s[(size_t)symap[dx] * sp + sx];
-        }
-        return 1;
-    }
-
-    /* R36SX: straight scale. */
-    static int xmap[2048];
-    static int last_w = -1, last_fbw = -1;
-    if (w != last_w || g_fbw != last_fbw) {
-        for (int dx = 0; dx < draw_w; dx++) xmap[dx] = dx * w / g_fbw;
-        last_w = w; last_fbw = g_fbw;
-    }
-    for (int dy = 0; dy < g_fbh; dy++) {
-        int sy = dy * h / g_fbh;
-        const uint16_t *srow = s + sy * sp;
-        uint16_t *drow = g_fbmem + (size_t)dy * g_fbstride;
-        for (int dx = 0; dx < draw_w; dx++)
-            drow[dx] = srow[xmap[dx]];
-    }
-    return 1;
-}
 
 int hwdisp_init(void) {
     extern void sf3000_dump_fb_state(const char *);
@@ -675,145 +571,6 @@ static void pad_horizontal(const void *src, int w, int h, int pitch_bytes, int p
  *   - Integer scale (dst_w = w*n, dst_h = h*m): unrolled replication +
  *     vertical row memcpy. Avoids per-pixel lookup tables.
  *   - Generic: xmap lookup. */
-static void upscale_nearest(const void *src, int w, int h, int pitch_bytes) {
-    if (!g_near_buf) return;
-
-    int dst_w, dst_h;
-    if (g_aspect_num > 0 && g_aspect_den > 0) {
-        /* Integer scale preferring largest factor that still fits */
-        int my = HW_H / h;
-        if (my < 1) my = 1;
-        int dw = w * my;
-        if (dw > HW_W) {
-            /* Width-limited: pick scale by width instead */
-            my = HW_W / w; if (my < 1) my = 1;
-            dw = w * my;
-        }
-        dst_h = h * my;
-        dst_w = dw;
-    } else {
-        /* Full stretch: integer-snap to 1280×720 if possible */
-        int mx = HW_W / w; if (mx < 1) mx = 1;
-        int my = HW_H / h; if (my < 1) my = 1;
-        dst_w = w * mx; dst_h = h * my;
-    }
-    int off_x = (HW_W - dst_w) / 2;
-    int off_y = (HW_H - dst_h) / 2;
-    if (off_x < 0) off_x = 0;
-    if (off_y < 0) off_y = 0;
-
-    /* Clear borders only when geometry changes */
-    static int last_dst_w = -1, last_dst_h = -1;
-    if (dst_w != last_dst_w || dst_h != last_dst_h) {
-        memset(g_near_buf, 0, HW_BUFSZ);
-        last_dst_w = dst_w; last_dst_h = dst_h;
-    }
-
-    const int sp = pitch_bytes / 2;
-    const uint16_t *s = (const uint16_t *)src;
-    const int nx = dst_w / w;    /* H replication factor (integer) */
-    const int ny = dst_h / h;    /* V replication factor (integer) */
-
-    /* Integer-scale fast path: expand one row, copy ny times.
-     * Use uint32_t writes (2 px/word) where alignment permits. */
-    if (nx >= 1 && ny >= 1 && nx * w == dst_w && ny * h == dst_h) {
-        const int row_bytes = dst_w * 2;
-        for (int sy = 0; sy < h; sy++) {
-            const uint16_t *srow = s + sy * sp;
-            uint16_t *drow = g_near_buf + (size_t)(sy * ny + off_y) * HW_W + off_x;
-
-            switch (nx) {
-            case 1:
-                memcpy(drow, srow, (size_t)w * 2);
-                break;
-            case 2: {
-                /* 1 src px → 1 uint32_t write (p|p<<16) */
-                uint32_t *d32 = (uint32_t *)drow;
-                for (int sx = 0; sx < w; sx++) {
-                    uint32_t p = srow[sx];
-                    d32[sx] = p | (p << 16);
-                }
-                break;
-            }
-            case 3:
-                for (int sx = 0; sx < w; sx++) {
-                    uint16_t p = srow[sx];
-                    uint16_t *dp = drow + sx * 3;
-                    dp[0] = p; dp[1] = p; dp[2] = p;
-                }
-                break;
-            case 4: {
-                /* 1 src px → 2 uint32_t writes */
-                uint32_t *d32 = (uint32_t *)drow;
-                for (int sx = 0; sx < w; sx++) {
-                    uint32_t p = srow[sx];
-                    uint32_t pp = p | (p << 16);
-                    d32[sx*2  ] = pp;
-                    d32[sx*2+1] = pp;
-                }
-                break;
-            }
-            case 5:
-                for (int sx = 0; sx < w; sx++) {
-                    uint16_t p = srow[sx];
-                    uint16_t *dp = drow + sx * 5;
-                    dp[0] = p; dp[1] = p; dp[2] = p; dp[3] = p; dp[4] = p;
-                }
-                break;
-            case 6: {
-                uint32_t *d32 = (uint32_t *)drow;
-                for (int sx = 0; sx < w; sx++) {
-                    uint32_t p = srow[sx];
-                    uint32_t pp = p | (p << 16);
-                    d32[sx*3  ] = pp;
-                    d32[sx*3+1] = pp;
-                    d32[sx*3+2] = pp;
-                }
-                break;
-            }
-            case 8: {
-                uint32_t *d32 = (uint32_t *)drow;
-                for (int sx = 0; sx < w; sx++) {
-                    uint32_t p = srow[sx];
-                    uint32_t pp = p | (p << 16);
-                    d32[sx*4  ] = pp;
-                    d32[sx*4+1] = pp;
-                    d32[sx*4+2] = pp;
-                    d32[sx*4+3] = pp;
-                }
-                break;
-            }
-            default:
-                for (int sx = 0; sx < w; sx++) {
-                    uint16_t p = srow[sx];
-                    uint16_t *dp = drow + sx * nx;
-                    for (int k = 0; k < nx; k++) dp[k] = p;
-                }
-                break;
-            }
-
-            /* Vertical replication: copy this row (ny-1) more times */
-            for (int v = 1; v < ny; v++)
-                memcpy(drow + (size_t)v * HW_W, drow, row_bytes);
-        }
-        return;
-    }
-
-    /* Generic fallback: xmap lookup */
-    static int xmap[HW_W];
-    static int last_w_map = -1, last_dst_w_map = -1;
-    if (w != last_w_map || dst_w != last_dst_w_map) {
-        for (int dx = 0; dx < dst_w; dx++) xmap[dx] = dx * w / dst_w;
-        last_w_map = w; last_dst_w_map = dst_w;
-    }
-    for (int dy = 0; dy < dst_h; dy++) {
-        int sy = dy * h / dst_h;
-        const uint16_t *srow = s + sy * sp;
-        uint16_t *drow = g_near_buf + (size_t)(dy + off_y) * HW_W + off_x;
-        for (int dx = 0; dx < dst_w; dx++)
-            drow[dx] = srow[xmap[dx]];
-    }
-}
 
 /* Direct present: write the frame straight into fb0; the display controller
  * scales fb0 → panel. Bypasses video_driver_disp_frame, which HANGS on R36SX
@@ -1241,8 +998,6 @@ void hwdisp_deinit(void) {
     if (p_deinit) p_deinit();
     sf3000_dump_fb_state("hwdisp_deinit/post-p_deinit");
     clear_fb0_for_shutdown();
-    if (g_fbmem) { munmap(g_fbmem, g_fbsize); g_fbmem = NULL; }
-    if (g_fbfd >= 0) { close(g_fbfd); g_fbfd = -1; }
     if (g_pad_buf) { free(g_pad_buf); g_pad_buf = NULL; g_pad_cap = 0; g_pad_w = 0; g_pad_h = 0; }
     if (g_near_buf) { free(g_near_buf); g_near_buf = NULL; }
     if (g_int_env[0]) { free(g_int_env[0]); g_int_env[0] = NULL; }

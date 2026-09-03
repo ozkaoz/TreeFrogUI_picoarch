@@ -584,9 +584,16 @@ static int menu_battery_color_mode(void)
 	if (cached < 0) {
 		FILE *f = fopen("/mnt/sdcard/frogui/settings.txt", "r");
 		cached = 0;
-		if (f) { char l[128]; while (fgets(l, sizeof l, f))
-			if (!strncmp(l, "battery_color=on", 16)) { cached = 1; break; }
-			fclose(f); }
+		if (f) {
+			char l[128];
+			while (fgets(l, sizeof l, f)) {
+				if (!strncmp(l, "battery_color=on", 16)) {
+					cached = 1;
+					break;
+				}
+			}
+			fclose(f);
+		}
 	}
 	return cached;
 }

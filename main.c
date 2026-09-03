@@ -9,9 +9,9 @@
 #include <errno.h>
 #include <sys/ioctl.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <time.h>
 
-#define FROGUI_CORE "/mnt/sdcard/cubegm/cores/frogui_libretro.so"
 #define PICOARCH_BIN    "/mnt/sdcard/cubegm/picoarch"
 #define PICOARCH_HI_BIN "/mnt/sdcard/cubegm/picoarch_hi"
 
@@ -48,9 +48,7 @@ bool should_quit = false;
 unsigned current_audio_buffer_size;
 char core_name[MAX_PATH];
 int config_override = 0;
-static int last_screenshot = 0;
 int g_debug_frame = 0;
-static int g_filter_on_menu_enter = -1;
 
 #ifdef PLATFORM_SF3000
 /* FrogUI owns the nearest/bilinear filter choice (single setting, applies to
@@ -118,8 +116,6 @@ static void load_frogui_settings(void) {
 	}
 	fclose(f);
 }
-static void load_frogui_filter(void) { load_frogui_settings(); }
-
 static int read_last_game(char *core, size_t cs, char *rom, size_t rs) {
 	FILE *f = fopen(LAST_GAME_FILE, "r");
 	if (!f) { DBG("DBG read_last_game: file missing (good)\n"); return 0; }
@@ -970,12 +966,23 @@ int main(int argc, char **argv) {
 	char content_path[MAX_PATH];
 	char tag_name[MAX_PATH];
 
-	if (argc > 1) {
+	if (argc > 1 && argv[1]) {
 		if (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help")) {
 			printf("Usage: picoarch libretro_core content [NONE DMG LCD SCANLINE]\n");
 			return 0;
 		}
 	}
+
+#ifdef PLATFORM_SF3000
+	/* Idle-static fix: record the core path BEFORE plat_init() so the audio
+	 * thread can tell a launcher boot (FrogUI, no audio) from a game boot and
+	 * skip opening the stock DAC in the launcher. An open unfed DAC loops
+	 * audible idle noise even at console volume 0 (see plat_sdl.c). */
+	if (argc > 1 && argv[1]) {
+		extern const char *sf3000_boot_core_path;
+		sf3000_boot_core_path = argv[1];
+	}
+#endif
 
 	if (plat_init()) {
 		quit(-1);
@@ -1214,11 +1221,16 @@ int quit(int code) {
 	/* libffplayer also owns AUDDEC/I2SO. Release only picoarch's proprietary
 	 * audio engine here. A full plat_finish() closes SDL/fb0 and prevents the
 	 * firmware player loader from reaching main(), while leaving audio active
-	 * makes audio-master video wait forever. */
-	if (next_is_video_player) {
+	 * makes audio-master video wait forever.
+	 * The launcher fallback gets the same treatment (idle-static fix): the
+	 * FrogUI process defers opening the DAC, so a driver left open here would
+	 * keep looping its last-buffer state (audible even at volume 0) forever.
+	 * Game→game execs keep the driver: the next process re-inits on its own
+	 * audio thread anyway. */
+	if (next_is_video_player || (!core_path[0] && !rom_path[0])) {
 		extern void sf3000_sound_finish_for_exec(void);
 		sf3000_sound_finish_for_exec();
-		DBG("DBG quit: audio cleanup done for video player\n");
+		DBG("DBG quit: audio cleanup done (video player / FrogUI fallback)\n");
 	}
 	/* Keep fb0/dis fds open across exec — closing them breaks the panel
 	 * state recovery (was working in commit 6537239). */
