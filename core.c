@@ -630,7 +630,10 @@ static void pa_input_poll(void) {
 		 * fire once, then refuse until SELECT is fully released. */
 		/* The FrogUI launcher core gets NO hotkeys: the pause menu makes no
 		 * sense there, and reopening/leaving it corrupts the launcher screen
-		 * (fb-write path). SELECT/START still reach FrogUI as plain buttons. */
+		 * (fb-write path). It also must not inherit a game's remappable Player
+		 * Control bindings: those can turn physical B into Left, so FrogUI's
+		 * visible "B Back" prompts no longer match. Feed its stable physical
+		 * cubevol mapping; FrogUI applies its own keymap.txt remaps itself. */
 		extern int g_is_frogui;
 		static int menu_armed = 1;
 		static int ss_armed = 1;   /* save/load-state latch */
@@ -638,7 +641,7 @@ static void pa_input_poll(void) {
 		static int suppress_menu_buttons = 0;
 		if (g_is_frogui) {
 			prev_raw = raw;
-			buttons = actions[IN_BINDTYPE_PLAYER12];
+			buttons = sf3000_keys_to_buttons(raw);
 			goto frogui_no_hotkeys;
 		}
 		if (menu_armed && (raw & (SEL_BIT | START_BIT)) == (SEL_BIT | START_BIT)) {
