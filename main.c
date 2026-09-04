@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <sys/ioctl.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <time.h>
 
 #define FROGUI_CORE "/mnt/sdcard/cubegm/cores/frogui_libretro.so"
@@ -48,9 +49,7 @@ bool should_quit = false;
 unsigned current_audio_buffer_size;
 char core_name[MAX_PATH];
 int config_override = 0;
-static int last_screenshot = 0;
 int g_debug_frame = 0;
-static int g_filter_on_menu_enter = -1;
 
 #ifdef PLATFORM_SF3000
 /* FrogUI owns the nearest/bilinear filter choice (single setting, applies to
@@ -118,8 +117,6 @@ static void load_frogui_settings(void) {
 	}
 	fclose(f);
 }
-static void load_frogui_filter(void) { load_frogui_settings(); }
-
 static int read_last_game(char *core, size_t cs, char *rom, size_t rs) {
 	FILE *f = fopen(LAST_GAME_FILE, "r");
 	if (!f) { DBG("DBG read_last_game: file missing (good)\n"); return 0; }
@@ -1224,6 +1221,24 @@ int quit(int code) {
 		extern void sf3000_sound_finish_for_exec(void);
 		sf3000_sound_finish_for_exec();
 		DBG("DBG quit: audio cleanup done for video player\n");
+	}
+	/* Standalone apps own their audio and have no gate: hand the amp line
+	 * over OPEN (the video player above keeps it closed because libffplayer
+	 * re-inits the whole audio path itself).
+	 * ORDER MATTERS - fixed the silent-PS1 race (device log 253-255): the
+	 * launcher's audio thread used to re-close the amp line ~2 ms after
+	 * this open, so pcsx4all exec'd with a physically muted speaker and
+	 * games like Worms Armageddon stayed totally silent.  Release our DAC
+	 * FIRST (the consumer thread deinits AUDDEC/I2SO on its own thread,
+	 * giving the audio daemon a clean handoff instead of a half-alive
+	 * stream), THEN open the amp line as the LAST audio action before
+	 * exec - nothing runs after this that could close it again. */
+	if (next_is_standalone && !next_is_video_player && !next_is_image_viewer) {
+		extern void sf3000_sound_release_for_exec(void);
+		sf3000_sound_release_for_exec();
+		extern void sf3000_sound_open_for_exec(void);
+		sf3000_sound_open_for_exec();
+		DBG("DBG quit: DAC released + speaker line opened for standalone app\n");
 	}
 	/* Keep fb0/dis fds open across exec — closing them breaks the panel
 	 * state recovery (was working in commit 6537239). */
