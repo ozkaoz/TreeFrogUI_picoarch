@@ -2310,10 +2310,13 @@ static int sf3000_aspect_forced(void) {
  * driver still performs the expensive enlargement to the panel in hardware. */
 static void sf3000_hw_present_frame(const void *src, int w, int h, int pitch,
                                     int game_frame) {
-    /* R36SX's direct path has its own hardware integer handling. SF3000 must
-     * never enter the CPU integer-envelope builder: submit the core frame
-     * unchanged and let HCGE scale it. */
-    if (game_frame && scale_size == SCALE_SIZE_NONE && sf3000_is_r36sx()) {
+    /* SF3000/SF3500 use the historical full-panel integer canvas because
+     * their driver does not reliably honor viewport-only integer scaling.
+     * R36SX keeps its separate direct framebuffer path. */
+    /* The 854x480 integer canvas is specific to SF3000/SF3500.  GB350 is a
+     * 640x480 panel and must remain on its normal R36-style presentation path. */
+    if (game_frame && scale_size == SCALE_SIZE_NONE &&
+        !sf3000_is_r36sx() && !sf3000_is_gb350()) {
         hwdisp_present_integer(src, w, h, pitch);
         return;
     }

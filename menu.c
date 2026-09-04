@@ -9,6 +9,10 @@
 #include "scale.h"
 #include "util.h"
 
+#ifdef PLATFORM_SF3000
+extern int sf3000_is_r36sx(void);
+#endif
+
 static int drew_alt_bg = 0;
 
 static char cores_path[MAX_PATH];
@@ -745,9 +749,17 @@ static menu_entry e_menu_video_options[] =
 
 	// only show effects on native scale
 static void menu_loop_video_prep(void) {
-	/* Keep the complete list visible while the SF3000 HCFB viewport path is
-	 * being tested. */
-	e_menu_video_options[4].data = men_aspect_ratio;
+	#ifdef PLATFORM_SF3000
+	/* SF3000/SF3500 expose only the hardware-supported Native and Fill modes.
+	 * R36SX keeps the complete aspect list on its separate display path. */
+	if (!sf3000_is_r36sx()) {
+		if (aspect_ratio_mode == 8) aspect_ratio_mode = 2; /* Fill -> compact index */
+		else if (aspect_ratio_mode > 2) aspect_ratio_mode = 1; /* unsupported forced ratio -> Native */
+		e_menu_video_options[4].data = men_aspect_ratio_sf;
+	} else {
+		e_menu_video_options[4].data = men_aspect_ratio;
+	}
+	#endif
 	/* Filter is owned by FrogUI settings. The old scale-size/effects entries are
 	 * intentionally removed from this menu; do not call me_enable() for their
 	 * IDs, since me_id2offset() falls back to entry 0 and disables Show FPS. */
@@ -765,6 +777,9 @@ static int menu_loop_video_options(int id, int keys)
 	menu_loop_video_prep();
 
 	me_loop_d(e_menu_video_options, &sel, menu_loop_video_prep, NULL);
+	#ifdef PLATFORM_SF3000
+	if (!sf3000_is_r36sx() && aspect_ratio_mode == 2) aspect_ratio_mode = 8;
+	#endif
 	scale_update_scaler();
 
 #ifdef PLATFORM_SF3000

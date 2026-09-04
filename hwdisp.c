@@ -1038,59 +1038,90 @@ void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {
  * enlargement, so the visible image remains N high and approximately N wide
  * (854 is not divisible by 2 or 3). This cuts staging and DMA traffic by roughly
  * N squared while retaining the integer-sized viewport. */
-#ifndef PANEL_W
-#define PANEL_W 854
-#endif
-#ifndef PANEL_H
-#define PANEL_H 480
-#endif
 void hwdisp_present_integer(const void *src, int w, int h, int pitch_bytes) {
     if (!g_active || !p_disp || !src) return;
     if (w <= 0 || h <= 0) return;
 
-    /* SF-class integer viewport: build the exact NxN result, then ask HCGE to
-     * aspect-fit that viewport into the 854x480 panel.  The old panel/N
-     * envelope (e.g. 428x240 for a 256x240 NES frame) made HCGE fill the full
-     * panel, which is why Integer looked horizontally squeezed instead of
-     * producing the expected 512x480 image. */
-    int nx = PANEL_W / w, ny = PANEL_H / h;
+    /* SF3000's driver accepts a 640x480 source surface and HCGE performs the
+     * final 640->854 panel mapping.  Build the integer-sized game image into
+     * that source surface, clearing the unused rows/columns to black first.
+     * Keeping the bars in the submitted frame is important: the driver then
+     * scales the complete canvas, rather than stretching the game pixels to
+     * the panel edges (which made Integer indistinguishable from Native). */
+    const int canvas_w = PANEL_PW;
+    const int canvas_h = PANEL_PH;
+    int nx = canvas_w / w, ny = canvas_h / h;
     int n = nx < ny ? nx : ny;
     if (n < 1) n = 1;
-    int env_w = w * n, active_h = h * n, env_h = PANEL_H;
-    if (active_h > env_h) active_h = env_h;
+    int env_w = canvas_w, env_h = canvas_h;
     static uint16_t *ib[2]; static int ibi;
-    if (!ib[0]) ib[0] = (uint16_t *)malloc(PANEL_W * PANEL_H * 2);
-    if (!ib[1]) ib[1] = (uint16_t *)malloc(PANEL_W * PANEL_H * 2);
+    if (!ib[0]) ib[0] = (uint16_t *)malloc(canvas_w * canvas_h * 2);
+    if (!ib[1]) ib[1] = (uint16_t *)malloc(canvas_w * canvas_h * 2);
     if (!ib[0] || !ib[1]) return;
     uint16_t *dst = ib[ibi]; ibi ^= 1;
-    memset(dst, 0, (size_t)env_w * env_h * 2);
     const uint16_t *s = (const uint16_t *)src;
     int sp = pitch_bytes / 2;
-    int yoff = (env_h - active_h) / 2;
+    int active_w = w * n, active_h = h * n;
+    /* Oversized core frames are not an Integer use-case, but keep the write
+     * bounded if one slips through (n==1 and w>canvas_w). */
+    if (active_w > env_w) active_w = env_w;
+    if (active_h > env_h) active_h = env_h;
+    int ox = (env_w - active_w) / 2;
+    int oy = (env_h - active_h) / 2;
+    static int last_w = -1, last_h = -1, last_n = -1, last_pitch = -1;
+    static unsigned char ib_ready[2];
+    /* The two ping-pong canvases retain their black bars between frames.  A
+     * full 640x480 clear is therefore needed only when geometry changes;
+     * steady-state work is just integer replication of the active rectangle. */
+    if (w != last_w || h != last_h || n != last_n || pitch_bytes != last_pitch) {
+        ib_ready[0] = ib_ready[1] = 0;
+        last_w = w; last_h = h; last_n = n; last_pitch = pitch_bytes;
+    }
+    if (!ib_ready[ibi ^ 1]) {
+        memset(dst, 0, (size_t)canvas_w * canvas_h * sizeof(*dst));
+        ib_ready[ibi ^ 1] = 1;
+    }
     for (int y = 0; y < h; y++) {
         const uint16_t *sr = s + (size_t)y * sp;
-        for (int ry = 0; ry < n; ry++) {
-            int dy = yoff + y * n + ry;
-            if (dy >= env_h) continue;
-            uint16_t *dr = dst + (size_t)dy * env_w;
-            for (int x = 0; x < w; x++)
-                for (int rx = 0; rx < n; rx++) dr[x * n + rx] = sr[x];
+        int copy_w = active_w < w * n ? active_w : w * n;
+        int row_y = oy + y * n;
+        if (row_y >= env_h) break;
+        uint16_t *dr = dst + (size_t)row_y * env_w + ox;
+        if (n == 2) {
+                /* Two pixels become one 32-bit word each; this is the hot path
+                 * for GBA/GBC/NES-sized frames on the 74KC MIPS core. */
+                int x = 0, out = 0;
+                for (; x + 1 < w && out + 4 <= copy_w; x += 2, out += 4) {
+                    uint32_t a = sr[x], b = sr[x + 1];
+                    uint32_t *d32 = (uint32_t *)(dr + out);
+                    d32[0] = (a << 16) | a;
+                    d32[1] = (b << 16) | b;
+                }
+                for (; x < w && out + 2 <= copy_w; x++, out += 2) {
+                    uint32_t px = sr[x];
+                    *(uint32_t *)(dr + out) = (px << 16) | px;
+                }
+        } else {
+                int limit = copy_w / n;
+                for (int x = 0; x < limit; x++)
+                    for (int rx = 0; rx < n; rx++) dr[x * n + rx] = sr[x];
         }
+        /* Vertical replication is a bulk copy of the completed row, avoiding
+         * repeating the horizontal pixel loop for every duplicate line. */
+        size_t row_bytes = (size_t)copy_w * sizeof(uint16_t);
+        for (int ry = 1; ry < n && row_y + ry < env_h; ry++)
+            memcpy(dst + (size_t)(row_y + ry) * env_w + ox, dr, row_bytes);
     }
-    /* Make the driver's aspect-fit target match the actual integer canvas,
-     * not the global 16:9 panel mode left by the menu. */
-    g_aspect_num = env_w;
-    g_aspect_den = env_h;
-    DBG("DBG integer HW: src=%dx%d n=%d active=%dx%d viewport=%dx%d panel=%dx%d\n",
-        w, h, n, env_w, active_h, env_w, env_h, PANEL_W, PANEL_H);
+    /* Ask HCGE to preserve the 4:3 source canvas while mapping it to the
+     * 854x480 panel.  The integer image (including its top/bottom/side bars)
+     * remains intact inside that canvas. */
+    g_aspect_num = canvas_w;
+    g_aspect_den = canvas_h;
+    DBG("DBG integer HW: src=%dx%d n=%d active=%dx%d canvas=%dx%d output=854x480\n",
+        w, h, n, w * n, h * n, env_w, env_h);
 
-    /* API arg 1 stores ge_is_full_screen=0. The exact 512x480 NES canvas is
-     * therefore centered without being stretched to the 854px panel width. */
-    if (p_aspect && (g_fs_state != 1 || g_fs_num != g_aspect_num || g_fs_den != g_aspect_den)) {
-        hwdisp_set_driver_fit(1, 1);
-        g_fs_num = g_aspect_num;
-        g_fs_den = g_aspect_den;
-    }
+    /* The frame is already panel-sized; keep the driver's normal fit mode. */
+    if (p_aspect && g_fs_state != 1) { hwdisp_set_driver_fit(1, 1); g_fs_state = 1; }
     p_disp(dst, env_w, env_h, env_w * 2);
 }
 
