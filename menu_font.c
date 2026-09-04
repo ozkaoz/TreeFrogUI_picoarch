@@ -13,10 +13,25 @@
 static stbtt_fontinfo font_info;
 static unsigned char *font_buffer = NULL;
 static float font_scale = 0.0f;
+static stbtt_fontinfo fallback_info;
+static unsigned char *fallback_buffer = NULL;
+static float fallback_scale = 0.0f;
+static int fallback_loaded = 0;
+static stbtt_fontinfo latin_info;
+static unsigned char *latin_buffer = NULL;
+static float latin_scale = 0.0f;
+static int latin_loaded = 0;
+static int active_font_id = 0;
+static int unicode_upper(int cp) {
+    if (cp >= 'a' && cp <= 'z') return cp - 32;
+    if (cp >= 0xE0 && cp <= 0xF6) return cp - 0x20;
+    if (cp >= 0xF8 && cp <= 0xFE) return cp - 0x20;
+    switch (cp) { case 0x0105:return 0x0104; case 0x0107:return 0x0106; case 0x0119:return 0x0118; case 0x0142:return 0x0141; case 0x0144:return 0x0143; case 0x015B:return 0x015A; case 0x017A:return 0x0179; case 0x017C:return 0x017B; default:return cp; }
+}
 static int   font_loaded = 0;
 static float font_px = 20.0f;
 
-static int load_font_file(const char *fname) {
+static int load_font_into(const char *fname, stbtt_fontinfo *info, unsigned char **buffer_out, float *scale_out) {
     char paths[4][256];
     snprintf(paths[0], sizeof(paths[0]), "/mnt/sdcard/cubegm/fonts/%s", fname);
     snprintf(paths[1], sizeof(paths[1]), "/mnt/sdcard/frogui/fonts/%s", fname);
@@ -37,14 +52,33 @@ static int load_font_file(const char *fname) {
     if (fread(buf, 1, sz, fp) != (size_t)sz) { free(buf); fclose(fp); return 0; }
     fclose(fp);
 
-    if (!stbtt_InitFont(&font_info, buf, stbtt_GetFontOffsetForIndex(buf, 0))) {
+    if (!stbtt_InitFont(info, buf, stbtt_GetFontOffsetForIndex(buf, 0))) {
         free(buf);
         return 0;
     }
-    if (font_buffer) free(font_buffer);
-    font_buffer = buf;
-    font_scale  = stbtt_ScaleForPixelHeight(&font_info, font_px);
+    if (*buffer_out) free(*buffer_out);
+    *buffer_out = buf;
+    *scale_out = stbtt_ScaleForPixelHeight(info, font_px);
+    return 1;
+}
+
+static int load_font_file(const char *fname) {
+    if (!load_font_into(fname, &font_info, &font_buffer, &font_scale)) return 0;
     font_loaded = 1;
+    return 1;
+}
+
+static int load_latin_fallback(void) {
+    if (latin_loaded) return 1;
+    if (!load_font_into("TreeFrogLatin.ttf", &latin_info, &latin_buffer, &latin_scale)) return 0;
+    latin_loaded = 1;
+    return 1;
+}
+
+static int load_unicode_fallback(void) {
+    if (fallback_loaded) return 1;
+    if (!load_font_into("TreeFrogUnicode.ttf", &fallback_info, &fallback_buffer, &fallback_scale)) return 0;
+    fallback_loaded = 1;
     return 1;
 }
 
@@ -52,9 +86,12 @@ int menu_font_init(float pixel_height) {
     if (pixel_height > 0) font_px = pixel_height;
     if (font_loaded) return 1;
     /* FrogUI's default font first, then monogram as fallback. */
-    if (load_font_file("GamePocket-Regular-ZeroKern.ttf")) return 1;
-    if (load_font_file("monogram.ttf")) return 1;
-    return 0;
+    load_font_file("GamePocket-Regular-ZeroKern.ttf");
+    if (!font_loaded) load_font_file("monogram.ttf");
+    /* Keep the compact UI font for Latin, but use the bundled wide Unicode
+     * face for ROM names whose glyphs are absent (CJK, Cyrillic, Greek, etc.). */
+    load_unicode_fallback();
+    return font_loaded;
 }
 
 int menu_font_ready(void) { return font_loaded; }
@@ -106,11 +143,78 @@ static gcache_t *gcache_get(char c) {
     return g;
 }
 
+static int utf8_next(const char **text) {
+    const unsigned char *p = (const unsigned char *)*text;
+    int cp;
+    if (!*p) return 0;
+    if (p[0] < 0x80) cp = p[0], *text += 1;
+    else if ((p[0] & 0xe0) == 0xc0 && p[1]) cp = ((p[0] & 0x1f) << 6) | (p[1] & 0x3f), *text += 2;
+    else if ((p[0] & 0xf0) == 0xe0 && p[1] && p[2]) cp = ((p[0] & 0x0f) << 12) | ((p[1] & 0x3f) << 6) | (p[2] & 0x3f), *text += 3;
+    else if ((p[0] & 0xf8) == 0xf0 && p[1] && p[2] && p[3]) cp = ((p[0] & 7) << 18) | ((p[1] & 0x3f) << 12) | ((p[2] & 0x3f) << 6) | (p[3] & 0x3f), *text += 4;
+    else cp = '?', *text += 1;
+    return cp;
+}
+
+static const stbtt_fontinfo *font_for_cp(int cp, float **scale_out) {
+    if (active_font_id == 1 && fallback_loaded) { *scale_out = &fallback_scale; return &fallback_info; }
+    if (active_font_id == 2 && latin_loaded) { *scale_out = &latin_scale; return &latin_info; }
+    if (stbtt_FindGlyphIndex(&font_info, cp)) { *scale_out = &font_scale; return &font_info; }
+    if (load_unicode_fallback() && stbtt_FindGlyphIndex(&fallback_info, cp)) { *scale_out = &fallback_scale; return &fallback_info; }
+    if (load_latin_fallback() && stbtt_FindGlyphIndex(&latin_info, cp)) { *scale_out = &latin_scale; return &latin_info; }
+    *scale_out = &font_scale;
+    return &font_info;
+}
+
+static int choose_text_font(const char *text) {
+    const char *p = text; int missing = 0;
+    while (*p) { if (!stbtt_FindGlyphIndex(&font_info, unicode_upper(utf8_next(&p)))) missing = 1; }
+    if (!missing) return 0;
+    if (load_unicode_fallback()) {
+        p = text; int all = 1; while (*p) if (!stbtt_FindGlyphIndex(&fallback_info, unicode_upper(utf8_next(&p)))) { all = 0; break; }
+        if (all) return 1;
+    }
+    if (load_latin_fallback()) {
+        p = text; int all = 1; while (*p) if (!stbtt_FindGlyphIndex(&latin_info, unicode_upper(utf8_next(&p)))) { all = 0; break; }
+        if (all) return 2;
+    }
+    return 0;
+}
+
+static int draw_uncached_codepoint(uint16_t *fb, int fb_w, int fb_h, int x, int y,
+                                   int cp, uint16_t color, const stbtt_fontinfo *info, float scale) {
+    int gi = stbtt_FindGlyphIndex(info, cp), x0, y0, x1, y1;
+    if (!gi) return 0;
+    stbtt_GetGlyphBitmapBox(info, gi, scale, scale, &x0, &y0, &x1, &y1);
+    int w = x1 - x0, h = y1 - y0;
+    if (w <= 0 || h <= 0 || w > 64 || h > 64) return 0;
+    unsigned char bmp[64 * 64];
+    memset(bmp, 0, sizeof(bmp));
+    stbtt_MakeGlyphBitmap(info, bmp, w, h, w, scale, scale, gi);
+    int ascent, descent, line_gap;
+    stbtt_GetFontVMetrics(info, &ascent, &descent, &line_gap);
+    int baseline = (int)(ascent * scale);
+    for (int row = 0; row < h; row++) for (int col = 0; col < w; col++) {
+        unsigned char a = bmp[row * w + col];
+        int px = x + x0 + col, py = y + baseline + y0 + row;
+        if (!a || px < 0 || px >= fb_w || py < 0 || py >= fb_h) continue;
+        if (a >= 255) fb[py * fb_w + px] = color;
+        else {
+            uint16_t bg = fb[py * fb_w + px]; int ia = 255 - a;
+            int fr=(color>>11)&31, fg=(color>>5)&63, fbl=color&31;
+            int br=(bg>>11)&31, bgc=(bg>>5)&63, bb=bg&31;
+            fb[py*fb_w+px]=(uint16_t)(((fr*a+br*ia)/255<<11)|((fg*a+bgc*ia)/255<<5)|((fbl*a+bb*ia)/255));
+        }
+    }
+    return (int)(stbtt_GetGlyphHMetrics(info, gi, &x0, &y0), x0 * scale);
+}
+
 void menu_font_set_px(float pixel_height) {
     if (pixel_height <= 0 || !font_loaded) return;
     if (pixel_height == font_px && gcache_baseline) return;  /* unchanged */
     font_px = pixel_height;
     font_scale = stbtt_ScaleForPixelHeight(&font_info, font_px);
+    if (fallback_loaded) fallback_scale = stbtt_ScaleForPixelHeight(&fallback_info, font_px);
+    if (latin_loaded) latin_scale = stbtt_ScaleForPixelHeight(&latin_info, font_px);
     gcache_reset();
     /* Pre-warm at this calm moment (once per size change) so no glyph is
      * first-rasterized during a memory-pressured frame. */
@@ -168,41 +272,50 @@ void menu_font_draw_text(uint16_t *fb, int fb_w, int fb_h,
                          int x, int y, const char *text, uint16_t color) {
     if (!font_loaded || !fb || !text) return;
     int prev = 0;
-    for (; *text; text++) {
-        char c = *text;
-        if (c >= 'a' && c <= 'z') c = c - 'a' + 'A';
-        int gi = stbtt_FindGlyphIndex(&font_info, c);
+    active_font_id = choose_text_font(text);
+    while (*text) {
+        int cp = utf8_next(&text);
+        cp = unicode_upper(cp);
+        float *scale_ptr;
+        const stbtt_fontinfo *info = font_for_cp(cp, &scale_ptr);
+        int gi = stbtt_FindGlyphIndex(info, cp);
         if (gi != 0) {
             int adv, lsb;
-            stbtt_GetGlyphHMetrics(&font_info, gi, &adv, &lsb);
-            if (prev) x += (int)(stbtt_GetGlyphKernAdvance(&font_info, prev, gi) * font_scale);
-            draw_char(fb, fb_w, fb_h, x, y, c, color);
-            x += (int)(adv * font_scale);
-            prev = gi;
+            stbtt_GetGlyphHMetrics(info, gi, &adv, &lsb);
+            if (info == &font_info && prev) x += (int)(stbtt_GetGlyphKernAdvance(info, prev, gi) * *scale_ptr);
+            if (info == &font_info && cp >= GC_FIRST && cp <= GC_LAST) draw_char(fb, fb_w, fb_h, x, y, (char)cp, color);
+            else draw_uncached_codepoint(fb, fb_w, fb_h, x, y, cp, color, info, *scale_ptr);
+            x += (int)(adv * *scale_ptr);
+            prev = info == &font_info ? gi : 0;
         } else {
             x += MENU_FONT_CHAR_SPACING;
             prev = 0;
         }
     }
+    active_font_id = 0;
 }
 
 int menu_font_measure(const char *text) {
     if (!font_loaded || !text) return 0;
     int width = 0, prev = 0;
-    for (; *text; text++) {
-        char c = *text;
-        if (c >= 'a' && c <= 'z') c = c - 'a' + 'A';
-        int gi = stbtt_FindGlyphIndex(&font_info, c);
+    active_font_id = choose_text_font(text);
+    while (*text) {
+        int cp = utf8_next(&text);
+        cp = unicode_upper(cp);
+        float *scale_ptr;
+        const stbtt_fontinfo *info = font_for_cp(cp, &scale_ptr);
+        int gi = stbtt_FindGlyphIndex(info, cp);
         if (gi != 0) {
             int adv, lsb;
-            stbtt_GetGlyphHMetrics(&font_info, gi, &adv, &lsb);
-            if (prev) width += (int)(stbtt_GetGlyphKernAdvance(&font_info, prev, gi) * font_scale);
-            width += (int)(adv * font_scale);
-            prev = gi;
+            stbtt_GetGlyphHMetrics(info, gi, &adv, &lsb);
+            if (info == &font_info && prev) width += (int)(stbtt_GetGlyphKernAdvance(info, prev, gi) * *scale_ptr);
+            width += (int)(adv * *scale_ptr);
+            prev = info == &font_info ? gi : 0;
         } else {
             width += MENU_FONT_CHAR_SPACING;
             prev = 0;
         }
     }
+    active_font_id = 0;
     return width;
 }
