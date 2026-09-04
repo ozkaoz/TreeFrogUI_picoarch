@@ -1742,14 +1742,14 @@ static void plat_sound_finish(void)
 #ifdef PLATFORM_SF3000
 /* Standalone media players need AUDDEC/I2SO released before exec, but calling
  * all of plat_finish() also tears down SDL/fb0 state that the firmware loader
- * expects to survive the handoff. Keep this deliberately audio-only. */
+ * expects to survive the handoff. Keep this deliberately audio-only.
+ * The amp line is NOT closed here: the next process (libffplayer video/image
+ * viewer, or FrogUI via the fallback in quit()) re-inits the whole digital
+ * audio path itself, so the physical line must stay OPEN for it to be
+ * audible - the caller opens or closes it as appropriate. */
 void sf3000_sound_finish_for_exec(void)
 {
 	plat_sound_finish();
-	/* Game→FrogUI handoff: FrogUI (v1.3.0_i) never powers the DAC, so also
-	 * leave the speaker-amp mute line HIGH - the next process inherits
-	 * silence instead of a live, hissing amp. */
-	sf3000_spk_mute(1);
 }
 
 /* Standalone apps (PCSX, DOS, Rockbox, media players) open their OWN audio
@@ -1758,6 +1758,14 @@ void sf3000_sound_finish_for_exec(void)
 void sf3000_sound_open_for_exec(void)
 {
 	sf3000_spk_mute(0);
+}
+
+/* Close (mute) the speaker-amp line: the game→FrogUI handoff - FrogUI
+ * (v1.3.0_i) never powers the DAC, so the next process inherits silence
+ * instead of a live, hissing amp. */
+void sf3000_sound_close_for_exec(void)
+{
+	sf3000_spk_mute(1);
 }
 
 /* Standalone handoff, audio side A (see main.c quit()): stop picoarch's
@@ -1772,6 +1780,12 @@ void sf3000_sound_release_for_exec(void)
 		sf3000_audio_running = 0;
 		pthread_join(sf3000_audio_thread, NULL);  /* thread deinits the DAC */
 	}
+	/* The audio daemon releases AUDDEC/I2SO asynchronously after our deinit
+	 * (~100 ms on these firmwares). Apps WITHOUT init retries (rockbox,
+	 * libffplayer) can lose the race and stay silent forever - pcsx4all
+	 * survived only because it retries its own init. Give the daemon the
+	 * same settle window picoarch itself uses at startup. */
+	usleep(150 * 1000);
 }
 #endif
 

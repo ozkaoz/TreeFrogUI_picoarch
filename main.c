@@ -1216,11 +1216,16 @@ int quit(int code) {
 	/* libffplayer also owns AUDDEC/I2SO. Release only picoarch's proprietary
 	 * audio engine here. A full plat_finish() closes SDL/fb0 and prevents the
 	 * firmware player loader from reaching main(), while leaving audio active
-	 * makes audio-master video wait forever. */
-	if (next_is_video_player) {
+	 * makes audio-master video wait forever. The amp line must stay OPEN:
+	 * libffplayer re-inits the whole digital audio path but never touches the
+	 * physical mute pad - a closed line here meant a silent video (the line
+	 * now lives in the caller, not in finish_for_exec). */
+	if (next_is_video_player || next_is_image_viewer) {
 		extern void sf3000_sound_finish_for_exec(void);
+		extern void sf3000_sound_open_for_exec(void);
 		sf3000_sound_finish_for_exec();
-		DBG("DBG quit: audio cleanup done for video player\n");
+		sf3000_sound_open_for_exec();
+		DBG("DBG quit: audio cleanup done + speaker line open for media app\n");
 	}
 	/* Standalone apps own their audio and have no gate: hand the amp line
 	 * over OPEN (the video player above keeps it closed because libffplayer
@@ -1257,10 +1262,15 @@ int quit(int code) {
 	}
 	/* A game hands off to FrogUI with exec(), so normal plat_finish() is not
 	 * reached.  Stop the game DAC before that handoff; FrogUI deliberately does
-	 * not initialise it, preventing idle hiss/static in the main menu. */
+	 * not initialise it, preventing idle hiss/static in the main menu. Also
+	 * close the amp line: the launcher mutes it on arrival anyway (see
+	 * plat_init), but this closes the window where the next process inherits
+	 * a live amp with no DAC owner. */
 	{
 		extern void sf3000_sound_finish_for_exec(void);
+		extern void sf3000_sound_close_for_exec(void);
 		sf3000_sound_finish_for_exec();
+		sf3000_sound_close_for_exec();
 	}
 	DBG("DBG exec FrogUI fallback: bin=%s\n", PICOARCH_BIN);
 	execl(PICOARCH_BIN, "picoarch", FROGUI_CORE, FROGUI_CORE, NULL);
