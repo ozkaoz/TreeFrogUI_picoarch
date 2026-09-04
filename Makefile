@@ -6,7 +6,7 @@ SYSROOT   = $(shell $(CC) --print-sysroot)
 
 PROCS     = -j4
 
-OBJS      = libpicofe/input.o libpicofe/in_sdl.o libpicofe/linux/in_evdev.o libpicofe/linux/plat.o libpicofe/fonts.o libpicofe/readpng.o libpicofe/config_file.o cheat.o config.o content.o core.o menu.o menu_font.o main.o options.o overrides.o patch.o scale.o scaler_neon.o unzip.o util.o
+OBJS      = libpicofe/input.o libpicofe/in_sdl.o libpicofe/linux/in_evdev.o libpicofe/linux/plat.o libpicofe/fonts.o libpicofe/readpng.o libpicofe/config_file.o cheat.o config.o content.o core.o menu.o menu_font.o i18n.o main.o options.o overrides.o patch.o scale.o scaler_neon.o unzip.o util.o
 
 BIN       = picoarch
 
@@ -118,6 +118,7 @@ ifeq ($(MMENU), 1)
 endif
 
 CFLAGS += $(EXTRA_CFLAGS)
+CFLAGS += -I../FrogUI/common
 
 SOFILES = $(foreach core,$(CORES),$(core)_libretro.so)
 
@@ -139,6 +140,9 @@ plat_sf3000.o: plat_sdl.c
 
 hwdisp.o: hwdisp.c hwdisp.h
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+i18n.o: ../FrogUI/common/i18n.c ../FrogUI/common/i18n.h
+	$(CC) $(CFLAGS) -c -o $@ ../FrogUI/common/i18n.c
 
 $(BIN): libpicofe/.patched $(OBJS)
 	$(CC) $(OBJS) $(LDFLAGS) -o $(BIN)

@@ -3,6 +3,7 @@
 #include "main.h"
 #include "menu.h"
 #include "menu_font.h"
+#include "i18n.h"
 #include "options.h"
 #include "overrides.h"
 #include "plat.h"
@@ -812,7 +813,9 @@ static int key_config_loop_wrap(int id, int keys)
 }
 
 const char *config_label(int id, int *offs) {
-	return config_override ? "Loaded: game config" : "Loaded: global config";
+	return config_override
+		? tr_or("pico.config.loaded_game", "Loaded: game config")
+		: tr_or("pico.config.loaded_global", "Loaded: global config");
 }
 
 static menu_entry e_menu_config_options[] =
@@ -891,6 +894,43 @@ static menu_entry e_menu_main[] =
 	mee_handler_id("Exit",               MA_MAIN_EXIT,        main_menu_handler),
 	mee_end,
 };
+
+/* Keep untranslated/third-party core labels untouched. These are PicoArch's
+ * own stable shell labels and are refreshed after the shared pack is loaded. */
+static void menu_localize(void)
+{
+	e_menu_main[0].name = tr_or("pico.menu.resume", "Resume game");
+	e_menu_main[1].name = tr_or("pico.menu.save_state", "Save state");
+	e_menu_main[2].name = tr_or("pico.menu.load_state", "Load state");
+	e_menu_main[3].name = tr_or("pico.menu.disc_control", "Disc control");
+	e_menu_main[4].name = tr_or("pico.menu.cheats", "Cheats");
+	e_menu_main[5].name = tr_or("pico.menu.options", "Options");
+	e_menu_main[6].name = tr_or("pico.menu.reset_game", "Reset game");
+	e_menu_main[7].name = tr_or("pico.menu.load_new_game", "Load new game");
+	e_menu_main[8].name = tr_or("pico.menu.exit", "Exit");
+	e_menu_options[0].name = tr_or("pico.options.audio_video", "Audio and video");
+	e_menu_options[1].name = tr_or("pico.options.emulator", "Emulator options");
+	e_menu_options[2].name = tr_or("pico.options.player_controls", "Player controls");
+	e_menu_options[3].name = tr_or("pico.options.emulator_controls", "Emulator controls");
+	e_menu_options[4].name = tr_or("pico.options.save_config", "Save config");
+	e_menu_video_options[0].name = tr_or("pico.video.show_fps", "Show FPS");
+	e_menu_video_options[1].name = tr_or("pico.video.show_cpu", "Show CPU %");
+	e_menu_video_options[2].name = tr_or("pico.video.fast_forward", "Fast forward (SELECT+R1)");
+	e_menu_video_options[3].name = tr_or("pico.video.rewind", "Rewind (hold SELECT+B)");
+	e_menu_video_options[4].name = tr_or("pico.video.aspect_ratio", "Aspect ratio");
+	e_menu_video_options[5].name = tr_or("pico.video.filter", "Filter");
+	e_menu_video_options[7].name = tr_or("pico.video.optimize_text", "Optimize text");
+	e_menu_video_options[8].name = tr_or("pico.video.audio_buffer", "Audio buffer");
+#ifdef PLATFORM_SF3000
+	e_menu_video_options[9].name = tr_or("pico.video.mono_output", "Mono output");
+	e_menu_video_options[10].name = tr_or("pico.video.sharpness", "Sharpness");
+	e_menu_video_options[11].name = tr_or("pico.video.volume", "Volume %");
+#endif
+	e_menu_config_options[0].name = tr_or("pico.config.save_global", "Save global config");
+	e_menu_config_options[1].name = tr_or("pico.config.save_game", "Save game config");
+	e_menu_config_options[2].name = tr_or("pico.config.delete_game", "Delete game config");
+	e_menu_config_options[3].name = tr_or("pico.config.restore_defaults", "Restore defaults");
+}
 
 static void draw_savestate_bg(int slot)
 {
@@ -1026,7 +1066,7 @@ static void minui_draw_main(menu_entry *menu, int sel) {
 		menu_font_draw_text((uint16_t *)g_menuscreen_ptr, W, H, tx, ty + th + 6 + tdy, cinfo, WHITE);
 	}
 
-	const char *leg = "B-BACK   A-OKAY";
+	const char *leg = tr_or("pico.legend.back_ok", "B-BACK   A-OKAY");
 	int lw = menu_font_measure(leg);
 	menu_font_draw_text((uint16_t *)g_menuscreen_ptr, W, H, W - lw - pad, H - rh + tdy, leg, WHITE);
 
@@ -1108,6 +1148,8 @@ void menu_loop(void)
 int menu_init(void)
 {
 	menu_init_base();
+	i18n_init_from_settings();
+	menu_localize();
 
 	/* Load FrogUI's TTF for the menu (no-op + bitmap fallback if unavailable). */
 	menu_font_init((float)MENU_TTF_PX);

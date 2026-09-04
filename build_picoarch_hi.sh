@@ -9,7 +9,7 @@ CC=${CROSS}gcc
 CFLAGS="-mips32r2 -march=mips32r2 -mtune=24kc -mfp32 -mhard-float -mlong-calls -EL"
 CFLAGS="$CFLAGS --sysroot=$SYSROOT"
 CFLAGS="$CFLAGS -Wall -fdata-sections -ffunction-sections"
-CFLAGS="$CFLAGS -I./ -I./libretro-common/include/"
+CFLAGS="$CFLAGS -I./ -I../FrogUI/common -I./libretro-common/include/"
 CFLAGS="$CFLAGS -I$SYSROOT/usr/include"
 CFLAGS="$CFLAGS -I$SYSROOT/usr/bin-o32/../../usr/include/SDL"
 CFLAGS="$CFLAGS -D_GNU_SOURCE=1 -D_REENTRANT"
@@ -25,7 +25,7 @@ DEFINES=(
 LDFLAGS="$CFLAGS -L$SYSROOT/usr/lib -lc -ldl -lgcc -lm -lSDL -lpng12 -lz -Wl,--gc-sections -lpthread -s"
 LDFLAGS="$LDFLAGS -Wl,-Ttext-segment=0x20000000"
 
-OBJS="libpicofe/input.o libpicofe/in_sdl.o libpicofe/linux/in_evdev.o libpicofe/linux/plat.o libpicofe/fonts.o libpicofe/readpng.o libpicofe/config_file.o cheat.o config.o content.o core.o menu.o menu_font.o main.o options.o overrides.o patch.o scale.o scaler_neon.o unzip.o util.o plat_sf3000.o hwdisp.o"
+OBJS="libpicofe/input.o libpicofe/in_sdl.o libpicofe/linux/in_evdev.o libpicofe/linux/plat.o libpicofe/fonts.o libpicofe/readpng.o libpicofe/config_file.o cheat.o config.o content.o core.o menu.o menu_font.o i18n.o main.o options.o overrides.o patch.o scale.o scaler_neon.o unzip.o util.o plat_sf3000.o hwdisp.o"
 
 cd /home/tomaszz/sf3000-work/picoarch
 
@@ -33,6 +33,8 @@ for src in libpicofe/input.c libpicofe/in_sdl.c libpicofe/linux/in_evdev.c libpi
     obj="${src%.c}.o"
     $CC $CFLAGS "${DEFINES[@]}" -c -o "$obj" "$src"
 done
+
+$CC $CFLAGS "${DEFINES[@]}" -c -o i18n.o ../FrogUI/common/i18n.c
 
 $CC $CFLAGS "${DEFINES[@]}" -c -o plat_sf3000.o plat_sf3000.c
 $CC $CFLAGS "${DEFINES[@]}" -c -o hwdisp.o hwdisp.c
