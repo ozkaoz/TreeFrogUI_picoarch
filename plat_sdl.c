@@ -21,6 +21,7 @@ static SDL_Surface* screen;
 #ifdef PLATFORM_SF3000
 #include <fcntl.h>
 #include <errno.h>
+#include <arpa/inet.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 #include <linux/fb.h>
@@ -674,6 +675,8 @@ static void video_print_msg(uint16_t *dst, uint32_t h, uint32_t pitch, char *msg
 	basic_text_out16_nf(dst, pitch, 2, h - 10, msg);
 }
 
+#ifndef PLATFORM_SF3000
+/* Nearest-neighbour resampler for the SDL audio path (non-SF3000 builds). */
 static int audio_resample_nearest(struct audio_frame data) {
 	static int diff = 0;
 	int consumed = 0;
@@ -692,6 +695,7 @@ static int audio_resample_nearest(struct audio_frame data) {
 
 	return consumed;
 }
+#endif
 
 static void *fb_flip(void)
 {
@@ -1039,6 +1043,8 @@ finish:
 	return ticks;
 }
 
+#ifndef PLATFORM_SF3000
+/* SDL audio callback (non-SF3000 builds). */
 static void plat_sound_callback(void *unused, uint8_t *stream, int len)
 {
 	int16_t *p = (int16_t *)stream;
@@ -1063,6 +1069,7 @@ static void plat_sound_callback(void *unused, uint8_t *stream, int len)
 		--len;
 	}
 }
+#endif
 
 #ifdef PLATFORM_SF3000
 static void *sf3000_sound_handle = NULL;
@@ -1095,25 +1102,253 @@ static void sf3000_i2so_set_volume(int level)
 	close(fd);
 }
 
-/* Recompute the live gain from the percent and persist it. Called from the menu. */
+/* ---- Shared system volume (cubevol persistentmem) --------------------------
+ * The console volume lives in ONE place: cubevol's avparam blob in
+ * /dev/persistentmem (req {flag=3,id=0,len=260}, volume = buf[0], 0..100).
+ * That is what the PHYSICAL volume buttons read/write (cubevol also mirrors
+ * it to the I2SO hardware path on every press).  Making it the single source
+ * of truth links Settings' Volume slider, the in-game menu and the physical
+ * buttons into ONE volume - changing it anywhere is visible everywhere in
+ * real time.  Structure + ioctls RE'd from cubevol's avparam_get/save_volume
+ * (same API family as the backlight slot; see FrogUI's backlight.c).
+ * sndgain.txt is kept as a legacy fallback only (missing pmem / old root). */
+struct sf3000_pmem_req { unsigned short flag, id, len, pad; void *buf; };
+#define SF3000_PMEM_GET 0x400c2602u
+#define SF3000_PMEM_SET 0x800c2603u
+
+static int sf3000_pmem_volume_read(void)
+{
+	unsigned char buf[260];
+	int fd = open("/dev/persistentmem", O_RDONLY);
+	if (fd >= 0) {
+		struct sf3000_pmem_req req = { 3, 0, 260, 0, buf };
+		if (ioctl(fd, SF3000_PMEM_GET, &req) == 0 && buf[0] <= 100) {
+			close(fd);
+			return buf[0];
+		}
+		close(fd);
+	}
+	return -1;
+}
+
+/* Store the shared volume AND mirror it to the I2SO hardware path, exactly
+ * like a cubevol button press does.  Also refresh sndgain.txt so legacy
+ * standalone frontends (pcsx4all, lgpt) still see a consistent level. */
+static void sf3000_pmem_volume_write(int level)
+{
+	unsigned char buf[260];
+	int fd;
+	if (level < 0) level = 0;
+	if (level > 100) level = 100;
+	memset(buf, 0, sizeof buf);
+	buf[0] = (unsigned char)level;
+	fd = open("/dev/persistentmem", O_RDWR);
+	if (fd >= 0) {
+		struct sf3000_pmem_req req = { 3, 0, 260, 0, buf };
+		(void)ioctl(fd, SF3000_PMEM_SET, &req);
+		close(fd);
+	}
+	sf3000_i2so_set_volume(level);
+	FILE *f = fopen(SF3000_SNDGAIN_PATH, "w");
+	if (f) { fprintf(f, "%d\n", level); fclose(f); }
+}
+
+
+/* Speaker-amp mute line (idle-static fix): the console mutes its speaker
+ * amplifier through GPIO_L pad /panel/speaker-output, driven with INVERTED
+ * polarity from what the DT name suggests.  Ground truth captured by
+ * watching the GPIO bank while plugging/unplugging headphones:
+ *   - idle, amp hissing:  pad LOW
+ *   - headphones in, speaker dead: pad HIGH (and it stays HIGH while the
+ *     plug is in; LOW again on unplug, hiss returns)
+ * So HIGH = speaker muted, LOW = speaker live.  Holding the pad HIGH while
+ * no real audio flows removes the constant menu/static hiss at the physical
+ * source - it survives every digital mute because the amp itself is the
+ * noise source.  The pad is configured OUTPUT first (the kernel boot leaves
+ * it input; cubevol's gpio_configure does the same at daemon start). */
+static volatile uint32_t *sf3000_gpioL_regs = NULL;
+static int sf3000_mute_pin = -1;
+static int sf3000_spk_mute_state = -1;   /* -1 unknown, 0 live, 1 muted */
+static int sf3000_gate_enabled = -1;      /* -1 = read cubegm config once */
+
+/* Persistent opt-out, in the same style as the other cubegm/ flags:
+ * an empty or absent cubegm/spk_gate.txt keeps the speaker gate ON (the
+ * fix for the constant idle static); a file containing "off" restores the
+ * stock always-live amp.  The gate never touches anything else - sounds
+ * (menu ticks, games, apps) simply open the line while they have content. */
+static int sf3000_gate_config(void)
+{
+	if (sf3000_gate_enabled < 0) {
+		sf3000_gate_enabled = 1;
+		FILE *f = fopen("/mnt/sdcard/cubegm/spk_gate.txt", "r");
+		if (f) {
+			char b[8] = {0};
+			if (fgets(b, sizeof b, f) && strncmp(b, "off", 3) == 0)
+				sf3000_gate_enabled = 0;
+			fclose(f);
+		}
+		if (sf3000_gate_enabled)
+			dbg_log("DBG A: speaker gate ON (cubegm/spk_gate.txt default)\n");
+		else
+			dbg_log("DBG A: speaker gate OFF by cubegm/spk_gate.txt\n");
+	}
+	return sf3000_gate_enabled;
+}
+
+/* Map the GPIO_L bank (pinctrl base 0x18800000, bank at +0x44) and resolve
+ * the mute pad from the device tree.  Returns 0 when the pad is drivable,
+ * non-zero otherwise (every caller then becomes a safe no-op, stock
+ * behaviour). */
+static int sf3000_spk_mute_map(void)
+{
+	if (!sf3000_gate_config()) return -1;   /* user opted out */
+	if (sf3000_gpioL_regs) return 0;
+	if (sf3000_mute_pin < 0) {
+		char buf[16];
+		uint32_t v;
+		int n, fd = open("/proc/device-tree/panel/speaker-output", O_RDONLY);
+		if (fd < 0) return -1;
+		n = read(fd, buf, sizeof(buf) - 1);
+		close(fd);
+		if (n < 4) { sf3000_mute_pin = -2; return -1; }
+		memcpy(&v, buf, 4);
+		v = ntohl(v);   /* DT cells are big-endian */
+		if (v >= 128 || (v >> 5) != 0) { sf3000_mute_pin = -2; return -1; }
+		sf3000_mute_pin = (int)(v & 0x1f);
+	}
+	{
+		int fd = open("/dev/mem", O_RDWR | O_SYNC);
+		void *m;
+		if (fd < 0) return -1;
+		m = mmap(NULL, 0x2020, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
+		         0x18800000);
+		close(fd);
+		if (m == MAP_FAILED) return -1;
+		sf3000_gpioL_regs = (volatile uint32_t *)((char *)m + 0x44);
+	}
+	return 0;
+}
+
+/* Drive the speaker mute line: mute=1 -> pad HIGH (speaker silent),
+ * mute=0 -> pad LOW (speaker live). */
+static void sf3000_spk_mute(int mute)
+{
+	uint32_t bit;
+	if (sf3000_spk_mute_map() != 0) return;
+	bit = 1u << sf3000_mute_pin;
+	/* direction (+0x14): OUTPUT before driving the value */
+	if (!(sf3000_gpioL_regs[5] & bit))
+		sf3000_gpioL_regs[5] |= bit;
+	if (mute) {
+		if (sf3000_spk_mute_state == 1) return;
+		sf3000_gpioL_regs[4] |= bit;    /* +0x10: HIGH = muted */
+		sf3000_spk_mute_state = 1;
+	} else {
+		if (sf3000_spk_mute_state == 0) return;
+		sf3000_gpioL_regs[4] &= ~bit;  /* LOW = live */
+		sf3000_spk_mute_state = 0;
+	}
+}
+
+/* How long the speaker stays live after the last REAL audio chunk was
+ * consumed.  Core bursts re-arm it continuously while a game plays music;
+ * the grace also spans short emulation gaps without audible gating.  Once
+ * it expires with nothing but concealment/idle, the amp line mutes and the
+ * idle hiss is gone until the next sound. */
+#define SF3000_SPK_LIVE_GRACE_MS 300
+
+/* Launcher (FrogUI) hold-open window after the last real audio chunk.  The
+ * amp itself needs a few ms of live line before it reproduces anything, so
+ * closing the line the instant a discrete tick's content is spent swallowed
+ * the whole blip (silent menu ticks even though the samples reached the
+ * DAC).  While the window is live the consumer keeps FEEDING DIGITAL
+ * SILENCE - the same state as a running game, which never hisses - so slow
+ * navigation also sounds on the first press.  500 ms covers comfortable
+ * menu navigation; once it expires with no new content the gate closes the
+ * line and the launcher returns to the validated silent-idle state. */
+#define SF3000_TICK_HOLD_MS 500
+
+/* Amp arm-up: when the first real content arrives with the speaker line
+ * still closed, open it and feed this many 10 ms chunks of digital silence
+ * BEFORE consuming the tick.  The amp and the firmware's playback pipeline
+ * need the runway (the old instant playback died inside the amp ramp-up);
+ * digital silence primes them exactly like a game's audio path without
+ * any hiss.  100 ms total. */
+#define SF3000_TICK_ARM_CHUNKS 10
+
+static uint64_t sf3000_now_us(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+}
+
+/* Silence-base speaker gate - the "silence layer" over the whole OS: the amp
+ * line is HIGH (muted) by default everywhere.  It opens (LOW) only around
+ * real audio content, and closes again the moment the content is gone - a
+ * discrete launcher tick opens it for exactly the tick, a continuous game
+ * soundtrack keeps it open via the grace window that spans core burst gaps.
+ * grace_ms == 0 closes with zero open-but-silent window (discrete sounds);
+ * games pass SF3000_SPK_LIVE_GRACE_MS so chunk-to-chunk gaps never click. */
+static void sf3000_spk_live_gate(uint64_t last_real_us, unsigned grace_ms)
+{
+	int want_live = last_real_us != 0 && grace_ms > 0 &&
+		(sf3000_now_us() - last_real_us) <
+			(uint64_t)grace_ms * 1000u;
+	if (want_live && sf3000_spk_mute_state != 0) {
+		sf3000_spk_mute(0);
+		if (sf3000_spk_mute_state == 0)
+			dbg_log("DBG A: audio flows; speaker line LOW\n");
+	} else if (!want_live && sf3000_spk_mute_state != 1) {
+		sf3000_spk_mute(1);
+		dbg_log("DBG A: audio idle; speaker line HIGH (silent)\n");
+	}
+}
+
+/* Recompute the live gain from the percent and persist it. Called from the
+ * in-game menu.  Writes the SHARED system volume (cubevol's persistentmem
+ * slot + I2SO hardware + legacy sndgain.txt), so the in-game Volume slider
+ * and the physical volume buttons are one and the same value. */
 void sf3000_apply_snd_gain(void) {
 	if (sf3000_snd_gain_pct < 0)   sf3000_snd_gain_pct = 0;
 	if (sf3000_snd_gain_pct > 100) sf3000_snd_gain_pct = 100;
 	sf3000_snd_gain_q8 = sf3000_snd_gain_pct * 256 / 100;
-	FILE *f = fopen(SF3000_SNDGAIN_PATH, "w");
-	/* This runs while leaving the pause menu.  fsync()+sync() used to block the
-	 * emulation thread long enough to starve the audio ring and make every
-	 * volume adjustment burp.  The tiny preference may be flushed lazily. */
-	if (f) { fprintf(f, "%d\n", sf3000_snd_gain_pct); fclose(f); }
+	sf3000_pmem_volume_write(sf3000_snd_gain_pct);
 }
 
+/* Read the shared system volume.  Cubevol's persistentmem slot (the physical
+ * buttons' value) wins; legacy sndgain.txt is only consulted when the pmem
+ * slot is unreadable (old root, pmem failure). */
 static void sf3000_load_snd_gain(void) {
-	sf3000_snd_gain_pct = 100;
-	FILE *f = fopen(SF3000_SNDGAIN_PATH, "r");
-	if (f) { int p; if (fscanf(f, "%d", &p) == 1) sf3000_snd_gain_pct = p; fclose(f); }
-	if (sf3000_snd_gain_pct < 0)   sf3000_snd_gain_pct = 0;
-	if (sf3000_snd_gain_pct > 100) sf3000_snd_gain_pct = 100;
-	sf3000_snd_gain_q8 = sf3000_snd_gain_pct * 256 / 100;
+	int p = sf3000_pmem_volume_read();
+	if (p < 0) {
+		p = 100;
+		FILE *f = fopen(SF3000_SNDGAIN_PATH, "r");
+		if (f) { int v; if (fscanf(f, "%d", &v) == 1) p = v; fclose(f); }
+	}
+	if (p < 0)   p = 0;
+	if (p > 100) p = 100;
+	sf3000_snd_gain_pct = p;
+	sf3000_snd_gain_q8 = p * 256 / 100;
+}
+
+/* Live volume reload for the running session.  The physical volume buttons
+ * (cubevol) change the persistentmem slot out from under us at any moment -
+ * poll it (see the audio thread's periodic check) and follow the shared
+ * value in real time, both the hardware path and our SW gain.  This is what
+ * makes a button press audible in the running game without a reboot, and
+ * keeps FrogUI's slider in sync with the buttons. */
+static void sf3000_reload_snd_gain_live(void) {
+	int p = sf3000_pmem_volume_read();
+	if (p < 0) return;
+	if (p != sf3000_snd_gain_pct) {
+		sf3000_snd_gain_pct = p;
+		sf3000_snd_gain_q8 = p * 256 / 100;
+		/* mirror to the hardware volume path exactly like a cubevol press
+		 * (re-asserting is harmless and covers paths that bypassed it) */
+		sf3000_i2so_set_volume(p);
+		dbg_log("DBG A: live volume -> %d%% (pmem, hw+sw)\n", p);
+	}
 }
 
 /* Non-blocking audio: a dedicated consumer thread owns the *blocking*
@@ -1177,10 +1412,22 @@ static void *sf3000_audio_thread_fn(void *unused)
 	(void)unused;
 	struct audio_frame chunk[SF3000_ACHUNK];
 	uint64_t next_us = 0;
+	uint64_t last_real_us = 0;   /* last consumed REAL audio (MONOTONIC) */
 	int primed = 0;
 	int driver_active = 0;
 	int recovering = 0;
-	struct audio_frame last = { 0, 0 };
+	int launcher = 0;
+	int arm_chunks = 0;   /* launcher: silence runway before the first tick */
+	{
+		extern int g_is_frogui;
+		launcher = g_is_frogui;
+	}
+	unsigned gain_reload_polls = 0;	struct audio_frame last = { 0, 0 };
+
+	/* Silence-base speaker gate: mute the amp line before any driver
+	 * startup - the pre-audio loading window would hiss otherwise.  The
+	 * line goes live with the first real audio chunk (grace gate below). */
+	sf3000_spk_mute(1);
 
 	/* Init the DAC ON THIS THREAD. The SF3500/HD/SF3100 driver keeps its audio
 	 * handle thread-local, so sound_driver_init() and sound_driver_playframe()
@@ -1208,6 +1455,13 @@ static void *sf3000_audio_thread_fn(void *unused)
 
 	while (sf3000_audio_running) {
 		int have_chunk = 0;
+		/* Live Volume (Settings slider): re-read sndgain.txt ~once a second
+		 * so a level change applies without a reboot.  Games get it through
+		 * their pause menu too; this covers the launcher and in-game. */
+		if (++gain_reload_polls >= 500) {
+			gain_reload_polls = 0;
+			sf3000_reload_snd_gain_live();
+		}
 		if (sf3000_audio_menu_paused) {
 			pthread_mutex_lock(&sf3000_aring_mtx);
 			sf3000_aring_r = sf3000_aring_w;
@@ -1216,6 +1470,11 @@ static void *sf3000_audio_thread_fn(void *unused)
 			next_us = 0;
 			recovering = 0;
 			last.left = last.right = 0;
+			/* Pause menu: nothing plays here, and the user expects instant
+			 * silence on an explicit pause - skip the grace and mute right
+			 * away, re-asserted every cycle. resume_from_menu re-arms the
+			 * gate through last_real_us on the first game chunk. */
+			sf3000_spk_mute(1);
 			usleep(2000);
 			continue;
 		}
@@ -1231,11 +1490,70 @@ static void *sf3000_audio_thread_fn(void *unused)
 		 * before starting, then feed the non-blocking stock driver at a steady
 		 * 48kHz instead of inheriting that burst cadence. A scaled frame can be
 		 * a few milliseconds late on these CPUs, so do not turn the first short
-		 * poll into a full re-prime (and an audible 20ms gap). */
-		if (!primed && avail >= SF3000_APREFILL)
+		 * poll into a full re-prime (and an audible 20ms gap).
+		 * LAUNCHER: prefill is ZERO - a navigation tick is a short discrete
+		 * burst (observed arriving as ~98-frame ring fragments) and must play
+		 * on FIRST press.  ARM-THEN-PLAY: the first content with the amp line
+		 * still closed opens it and feeds SF3000_TICK_ARM_CHUNKS of digital
+		 * silence first - the amp/pipeline need that runway or the tick dies
+		 * inside the ramp-up (field-tested: only every 2nd fast press was
+		 * audible).  While content keeps arriving (hold window) the DAC stays
+		 * fed with silence, keeping the pipeline hot for the next press. */
+		if (!primed && avail >= (launcher ? 1u : SF3000_APREFILL)) {
+			if (launcher) {
+				/* At system volume 0 (sndgain 0) the content is inaudible by
+				 * design - keep the line closed; nothing needs the amp. */
+				if (sf3000_snd_gain_q8 > 0) {
+					int was_muted = (sf3000_spk_mute_state != 0);
+					sf3000_spk_mute(0);
+					if (was_muted) {
+						/* cold-start: arm the amp with silence before the tick */
+						arm_chunks = SF3000_TICK_ARM_CHUNKS;
+						dbg_log("DBG A: launcher cold tick; arming %u x10ms\n",
+						        (unsigned)SF3000_TICK_ARM_CHUNKS);
+					}
+				}
+			}
 			primed = 1;
+		}
 		if (primed) {
 			unsigned take = avail < SF3000_ACHUNK ? avail : SF3000_ACHUNK;
+			/* LAUNCHER ARM PHASE: the amp line just opened for this tick.
+			 * Consume DIGITAL SILENCE chunks first (real content stays
+			 * queued behind them) so the amp and the firmware pipeline are
+			 * fully live before the tick plays - that is what makes the
+			 * FIRST press audible.  Identical to a running game's silence,
+			 * so it cannot hiss. */
+			if (launcher && arm_chunks > 0) {
+				arm_chunks--;
+				for (int i = 0; i < SF3000_ACHUNK; i++) {
+					chunk[i].left = 0;
+					chunk[i].right = 0;
+				}
+				last.left = last.right = 0;
+				have_chunk = 1;
+				/* real audio is queued; treat it as flowing for the gate */
+				if (take)
+					last_real_us = sf3000_now_us();
+				pthread_mutex_unlock(&sf3000_aring_mtx);
+				goto play_silence;
+			}
+			/* LAUNCHER: a tick is a discrete event.  Once its content is
+			 * spent (take==0, nothing but concealment would follow), drop
+			 * the primed state and fall to the idle path - the hold window
+			 * below keeps feeding silence while it lasts, then the gate
+			 * closes the amp line.  The next tick re-primes (and re-opens
+			 * the line) on its own press.  Games keep the stock concealment
+			 * cadence (anti-crackle). */
+			if (launcher && take == 0) {
+				primed = 0;
+				next_us = 0;
+				recovering = 0;
+				pthread_mutex_unlock(&sf3000_aring_mtx);
+				continue;
+			}
+			if (take)
+				last_real_us = sf3000_now_us();   /* real audio flowed */
 			for (unsigned i = 0; i < take; i++) {
 				chunk[i] = sf3000_aring[sf3000_aring_r & SF3000_ARING_MASK];
 				sf3000_aring_r++;
@@ -1287,9 +1605,40 @@ static void *sf3000_audio_thread_fn(void *unused)
 		pthread_mutex_unlock(&sf3000_aring_mtx);
 
 		if (!have_chunk) {
-			usleep(2000);  /* underrun: wait for the emu thread to refill */
-			continue;
+			/* Loading stall / silent gap.  Games: the gate closes once real
+			 * audio stops flowing (grace window spans emulation bursts).
+			 * LAUNCHER HOLD: while the hold window after the last real tick
+			 * is still live, keep FEEDING DIGITAL SILENCE instead of idling -
+			 * the amp and the firmware pipeline stay hot, so the next tick
+			 * (even a slow single press) is audible immediately, and the
+			 * fed silence is exactly what a running game emits during quiet
+			 * passages, so it cannot hiss.  Once the hold expires the gate
+			 * closes the line and the launcher returns to the validated
+			 * silent-idle state (no hiss at rest). */
+			if (launcher &&
+			    sf3000_snd_gain_q8 > 0 &&
+			    last_real_us != 0 &&
+			    (sf3000_now_us() - last_real_us) <
+			        (uint64_t)SF3000_TICK_HOLD_MS * 1000u) {
+				for (int i = 0; i < SF3000_ACHUNK; i++) {
+					chunk[i].left = 0;
+					chunk[i].right = 0;
+				}
+				last.left = last.right = 0;
+				/* fall through to the driver write below (skip gate + gain:
+				 * zeros stay zeros; the pause-menu path above handles its
+				 * own mute) */
+			} else {
+				sf3000_spk_live_gate(last_real_us,
+				                     launcher ? SF3000_TICK_HOLD_MS
+				                                              : SF3000_SPK_LIVE_GRACE_MS);
+				usleep(2000);  /* underrun: wait for the emu thread to refill */
+				continue;
+			}
+		} else if (!launcher) {
+			sf3000_spk_live_gate(last_real_us, SF3000_SPK_LIVE_GRACE_MS);
 		}
+play_silence:
 
 		/* Software output gain (volume-curve workaround). The stock level→volume
 		 * mapping is linear, so low system-volume settings stay loud. Scaling our
@@ -1397,6 +1746,32 @@ static void plat_sound_finish(void)
 void sf3000_sound_finish_for_exec(void)
 {
 	plat_sound_finish();
+	/* Game→FrogUI handoff: FrogUI (v1.3.0_i) never powers the DAC, so also
+	 * leave the speaker-amp mute line HIGH - the next process inherits
+	 * silence instead of a live, hissing amp. */
+	sf3000_spk_mute(1);
+}
+
+/* Standalone apps (PCSX, DOS, Rockbox, media players) open their OWN audio
+ * and have no speaker gate - they need the amp line OPEN to be audible.
+ * Called before exec-ing one. */
+void sf3000_sound_open_for_exec(void)
+{
+	sf3000_spk_mute(0);
+}
+
+/* Standalone handoff, audio side A (see main.c quit()): stop picoarch's
+ * audio consumer thread - the thread deinits the proprietary DAC itself,
+ * the only thread-safe way to release AUDDEC/I2SO (the SF3500-class driver
+ * keeps its handle thread-local).  Keeps driver.so dlopen'ed so the next
+ * picoarch process finds the same library state as before.  The amp line
+ * is NOT touched here; main.c opens it as the very last step before exec. */
+void sf3000_sound_release_for_exec(void)
+{
+	if (sf3000_audio_running) {
+		sf3000_audio_running = 0;
+		pthread_join(sf3000_audio_thread, NULL);  /* thread deinits the DAC */
+	}
 }
 #endif
 
@@ -1708,13 +2083,42 @@ int plat_init(void)
 
     /* FrogUI is a launcher.  Do not power the proprietary DAC for it: the
        analogue output can hiss even with no samples and a UI volume of zero.
+       Exception: FrogUI's own Settings can enable navigation ticks
+       (menu_sounds=on).  With ticks on, the launcher needs the audio path -
+       the speaker gate keeps every other window silent, so the DAC is only
+       powered when the user asked for audible UI feedback.
        Games run in a fresh PicoArch exec and initialise audio normally. */
     extern int g_is_frogui;
-    if (!g_is_frogui && plat_sound_init()) {
+    if (g_is_frogui) {
+        int launcher_audio = 0;
+        FILE *f = fopen("/mnt/sdcard/frogui/settings.txt", "r");
+        if (f) {
+            char line[64];
+            while (fgets(line, sizeof(line), f)) {
+                if (strncmp(line, "menu_sounds=on", 14) == 0) {
+                    launcher_audio = 1;
+                    break;
+                }
+            }
+            fclose(f);
+        }
+        if (launcher_audio) {
+            if (plat_sound_init() == 0) {
+                /* path exists but starts silent: nothing plays until a tick */
+                sf3000_spk_mute(1);
+                PA_INFO("SF3000: launcher audio enabled (menu ticks on)\n");
+            }
+        } else {
+            /* No DAC for the launcher (v1.3.0_i design) - and make sure the
+             * amp line is muted: a standalone app (PCSX etc.) exits with the
+             * line open and its DAC closed, which is exactly the amp-hiss
+             * state. The launcher mutes it on arrival, every arrival. */
+            sf3000_spk_mute(1);
+            PA_INFO("SF3000: audio DAC disabled for FrogUI launcher\n");
+        }
+    } else if (plat_sound_init()) {
         PA_ERROR("SF3000 SDL sound failed to init (continuing without audio): %s\n", SDL_GetError());
     }
-    if (g_is_frogui)
-        PA_INFO("SF3000: audio DAC disabled for FrogUI launcher\n");
 
 dbg_log("DBG M3: sound init done\n");
     sf3000_keys_init();
@@ -2765,7 +3169,6 @@ if (sf3000_use_hwdisp) {
 
     static uint32_t row_cache[180];
     static int last_fb_y_off = -1, last_fb_y_len = -1;
-    int prev_gx = -1;
 
     /* Cycle between page 0 and page 1 for double buffering */
     sf3000_current_page = (sf3000_current_page + 1) % 2;
