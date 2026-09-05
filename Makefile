@@ -1,4 +1,4 @@
-# Global definitions
+﻿# Global definitions
 platform   ?= unix
 
 CC        = $(CROSS_COMPILE)gcc
@@ -6,7 +6,7 @@ SYSROOT   = $(shell $(CC) --print-sysroot)
 
 PROCS     = -j4
 
-OBJS      = libpicofe/input.o libpicofe/in_sdl.o libpicofe/linux/in_evdev.o libpicofe/linux/plat.o libpicofe/fonts.o libpicofe/readpng.o libpicofe/config_file.o cheat.o config.o content.o core.o menu.o menu_font.o i18n.o main.o options.o overrides.o patch.o scale.o scaler_neon.o unzip.o util.o
+OBJS      = libpicofe/input.o libpicofe/in_sdl.o libpicofe/linux/in_evdev.o libpicofe/linux/plat.o libpicofe/fonts.o libpicofe/readpng.o libpicofe/config_file.o cheat.o config.o content.o core.o menu.o menu_font.o i18n.o main.o options.o overrides.o patch.o scale.o scaler_neon.o unzip.o util.o frogui_settings.o
 
 BIN       = picoarch
 
@@ -74,10 +74,10 @@ else ifeq ($(platform), miyoomini)
 else ifeq ($(platform), sf3000)
 	OBJS += plat_sf3000.o hwdisp.o
 	CFLAGS += -mips32r2 -march=mips32r2 -mtune=24kc -mfp32 -mhard-float -DCONTENT_DIR='"/mnt/SDCARD/Roms"' -DUSE_C_SCALER -DPLATFORM_SF3000
-	# Panel geometry is detected at runtime (SF3000 854x480 / R36SX 640x480) —
+	# Panel geometry is detected at runtime (SF3000 854x480 / R36SX 640x480) â€”
 	# see sf3000_detect_device() in plat_sdl.c. No compile-time panel defines.
 	LDFLAGS += -mips32r2 -march=mips32r2 -mtune=24kc -mfp32 -mhard-float -lpthread
-	# Disable LTO — breaks MIPS ABICALLS GP setup for static function pointers passed to PIC code
+	# Disable LTO â€” breaks MIPS ABICALLS GP setup for static function pointers passed to PIC code
 	CFLAGS  := $(filter-out -flto,$(CFLAGS))
 	LDFLAGS := $(filter-out -flto,$(LDFLAGS))
 
@@ -143,6 +143,9 @@ hwdisp.o: hwdisp.c hwdisp.h
 
 i18n.o: ../FrogUI/common/i18n.c ../FrogUI/common/i18n.h
 	$(CC) $(CFLAGS) -c -o $@ ../FrogUI/common/i18n.c
+
+frogui_settings.o: frogui_settings.c frogui_settings.h
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(BIN): libpicofe/.patched $(OBJS)
 	$(CC) $(OBJS) $(LDFLAGS) -o $(BIN)
