@@ -930,6 +930,24 @@ static void menu_localize(void)
 	e_menu_config_options[1].name = tr_or("pico.config.save_game", "Save game config");
 	e_menu_config_options[2].name = tr_or("pico.config.delete_game", "Delete game config");
 	e_menu_config_options[3].name = tr_or("pico.config.restore_defaults", "Restore defaults");
+	me_ctrl_actions[0].name = (char *)tr_or("pico.control.up", "UP       ");
+	me_ctrl_actions[1].name = (char *)tr_or("pico.control.down", "DOWN     ");
+	me_ctrl_actions[2].name = (char *)tr_or("pico.control.left", "LEFT     ");
+	me_ctrl_actions[3].name = (char *)tr_or("pico.control.right", "RIGHT    ");
+	me_ctrl_actions[4].name = (char *)tr_or("pico.control.a", "A BUTTON ");
+	me_ctrl_actions[5].name = (char *)tr_or("pico.control.b", "B BUTTON ");
+	me_ctrl_actions[6].name = (char *)tr_or("pico.control.x", "X BUTTON ");
+	me_ctrl_actions[7].name = (char *)tr_or("pico.control.y", "Y BUTTON ");
+	me_ctrl_actions[8].name = (char *)tr_or("pico.control.start", "START    ");
+	me_ctrl_actions[9].name = (char *)tr_or("pico.control.select", "SELECT   ");
+	me_ctrl_actions[10].name = (char *)tr_or("pico.control.l", "L BUTTON ");
+	me_ctrl_actions[11].name = (char *)tr_or("pico.control.r", "R BUTTON ");
+	me_ctrl_actions[12].name = (char *)tr_or("pico.control.l2", "L2 BUTTON ");
+	me_ctrl_actions[13].name = (char *)tr_or("pico.control.r2", "R2 BUTTON ");
+	emuctrl_actions[0].name = (char *)tr_or("pico.emu.save_state", "Save State       ");
+	emuctrl_actions[1].name = (char *)tr_or("pico.emu.load_state", "Load State       ");
+	emuctrl_actions[2].name = (char *)tr_or("pico.emu.toggle_hud", "Toggle FPS/CPU%  ");
+	emuctrl_actions[3].name = (char *)tr_or("pico.emu.fast_forward", "Toggle FF        ");
 }
 
 static void draw_savestate_bg(int slot)
