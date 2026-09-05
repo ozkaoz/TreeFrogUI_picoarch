@@ -6,7 +6,7 @@ SYSROOT   = $(shell $(CC) --print-sysroot)
 
 PROCS     = -j4
 
-OBJS      = libpicofe/input.o libpicofe/in_sdl.o libpicofe/linux/in_evdev.o libpicofe/linux/plat.o libpicofe/fonts.o libpicofe/readpng.o libpicofe/config_file.o cheat.o config.o content.o core.o menu.o menu_font.o main.o options.o overrides.o patch.o scale.o scaler_neon.o unzip.o util.o
+OBJS      = libpicofe/input.o libpicofe/in_sdl.o libpicofe/linux/in_evdev.o libpicofe/linux/plat.o libpicofe/fonts.o libpicofe/readpng.o libpicofe/config_file.o cheat.o config.o content.o core.o menu.o menu_font.o main.o options.o overrides.o patch.o scale.o scaler_neon.o unzip.o util.o frogui_settings.o
 
 BIN       = picoarch
 
@@ -138,6 +138,9 @@ plat_linux.o: plat_sdl.c
 plat_sf3000.o: plat_sdl.c
 
 hwdisp.o: hwdisp.c hwdisp.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+frogui_settings.o: frogui_settings.c frogui_settings.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(BIN): libpicofe/.patched $(OBJS)

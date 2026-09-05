@@ -29,6 +29,7 @@ static SDL_Surface* screen;
 #include <sys/shm.h>
 #include <string.h>
 #include "hwdisp.h"
+#include "frogui_settings.h"
 
 int sf3000_use_hwdisp = 0;
 
@@ -1133,13 +1134,19 @@ static int sf3000_pmem_volume_read(void)
 
 /* Store the shared volume AND mirror it to the I2SO hardware path, exactly
  * like a cubevol button press does.  Also refresh sndgain.txt so legacy
- * standalone frontends (pcsx4all, lgpt) still see a consistent level. */
+ * standalone frontends (pcsx4all, lgpt) still see a consistent level.
+ * persistentmem is EEPROM-like: compare first and skip the durable write
+ * when the level is unchanged - this path is hit by in-menu volume steps
+ * and the live poll, where rewriting the same value adds wear and latency
+ * for no effect. */
 static void sf3000_pmem_volume_write(int level)
 {
 	unsigned char buf[260];
 	int fd;
 	if (level < 0) level = 0;
 	if (level > 100) level = 100;
+	if (sf3000_pmem_volume_read() == level)
+		goto mirror;   /* already stored: hardware mirror only, no EEPROM write */
 	memset(buf, 0, sizeof buf);
 	buf[0] = (unsigned char)level;
 	fd = open("/dev/persistentmem", O_RDWR);
@@ -1148,6 +1155,7 @@ static void sf3000_pmem_volume_write(int level)
 		(void)ioctl(fd, SF3000_PMEM_SET, &req);
 		close(fd);
 	}
+mirror:
 	sf3000_i2so_set_volume(level);
 	FILE *f = fopen(SF3000_SNDGAIN_PATH, "w");
 	if (f) { fprintf(f, "%d\n", level); fclose(f); }
@@ -1165,11 +1173,41 @@ static void sf3000_pmem_volume_write(int level)
  * no real audio flows removes the constant menu/static hiss at the physical
  * source - it survives every digital mute because the amp itself is the
  * noise source.  The pad is configured OUTPUT first (the kernel boot leaves
- * it input; cubevol's gpio_configure does the same at daemon start). */
+ * it input; cubevol's gpio_configure does the same at daemon start).
+ *
+ * BOARD BACKEND, FAIL CLOSED: the raw /dev/mem mapping is only driven when
+ * the running device + its live device-tree EXACTLY match one validated
+ * board entry below.  Any mismatch (unknown device, absent/renamed DT node,
+ * pin out of range for that board) leaves the gate disabled: every caller
+ * becomes a no-op and the amp stays in its stock state, so an unvalidated
+ * target can never have unrelated registers touched.  Devices with no
+ * validated entry (SF3000/GB350/SF3500 today) are stock-by-construction. */
+int sf3000_device_id(void);   /* TF_DEV_* (defined with device detection) */
+enum { TF_DEV_SF3000 = 0, TF_DEV_R36SX = 1, TF_DEV_SF3500 = 2, TF_DEV_GB350 = 3 };
 static volatile uint32_t *sf3000_gpioL_regs = NULL;
 static int sf3000_mute_pin = -1;
 static int sf3000_spk_mute_state = -1;   /* -1 unknown, 0 live, 1 muted */
-static int sf3000_gate_enabled = -1;      /* -1 = read cubegm config once */
+static int sf3000_gate_enabled = -1;     /* -1 = read cubegm config once */
+static pthread_mutex_t sf3000_spk_mtx = PTHREAD_MUTEX_INITIALIZER;
+
+/* Validated board table.  dt_node      - the device-tree property holding
+ * the mute pad (big-endian u32 pin number); mute_pol - 1 when HIGH means
+ * muted.  Entries exist ONLY for boards whose full DT/pin/register mapping
+ * was physically verified (ground truth: AMPMON captures, headphone
+ * plug/unplug bank diffs).  Adding a device requires capturing its own
+ * evidence first, never extending an existing entry's ranges. */
+struct sf3000_spk_board {
+	int dev_id;             /* TF_DEV_* (plat_sdl device detection) */
+	const char *dt_node;    /* expected DT node under /proc/device-tree */
+	int pin_min, pin_max;  /* validated pin range for this board */
+	int mute_pol;           /* 1: HIGH = muted (R36SX measured) */
+};
+static const struct sf3000_spk_board sf3000_spk_boards[] = {
+	/* R36SX V2.6: /panel/speaker-output = GPIO_L pin, HIGH mutes the amp.
+	 * Captured on-device while plugging/unplugging headphones. */
+	{ TF_DEV_R36SX, "/proc/device-tree/panel/speaker-output", 0, 31, 1 },
+};
+#define SF3000_SPK_BOARD_N ((int)(sizeof(sf3000_spk_boards) / sizeof(sf3000_spk_boards[0])))
 
 /* Persistent opt-out, in the same style as the other cubegm/ flags:
  * an empty or absent cubegm/spk_gate.txt keeps the speaker gate ON (the
@@ -1195,26 +1233,63 @@ static int sf3000_gate_config(void)
 	return sf3000_gate_enabled;
 }
 
-/* Map the GPIO_L bank (pinctrl base 0x18800000, bank at +0x44) and resolve
- * the mute pad from the device tree.  Returns 0 when the pad is drivable,
- * non-zero otherwise (every caller then becomes a safe no-op, stock
- * behaviour). */
+/* Resolve the mute pad for the RUNNING device and check it against the
+ * validated board table.  Returns the matching entry, or NULL when this
+ * device/pin combination was never validated (gate stays disabled). */
+static const struct sf3000_spk_board *sf3000_spk_board_match(void)
+{
+	int id = sf3000_device_id();   /* TF_DEV_* for the running console */
+	for (int i = 0; i < SF3000_SPK_BOARD_N; i++)
+		if (sf3000_spk_boards[i].dev_id == id)
+			return &sf3000_spk_boards[i];
+	return NULL;
+}
+
+/* Map the GPIO_L bank and resolve the mute pad, but ONLY for a validated
+ * board: the running device must match a table entry, the DT node that
+ * entry declares must exist, and the pin it reports must be inside the
+ * entry's validated range.  Anything else fails closed (gate disabled,
+ * stock amp behaviour) - /dev/mem is never touched on an unvalidated
+ * target.  Returns 0 when the pad is drivable, non-zero otherwise. */
 static int sf3000_spk_mute_map(void)
 {
+	const struct sf3000_spk_board *board;
 	if (!sf3000_gate_config()) return -1;   /* user opted out */
 	if (sf3000_gpioL_regs) return 0;
+	board = sf3000_spk_board_match();
+	if (!board) {
+		dbg_log("DBG A: speaker gate: no validated board for this device "
+		         "- staying stock (fail closed)\n");
+		return -1;
+	}
 	if (sf3000_mute_pin < 0) {
+		char path[96];
 		char buf[16];
 		uint32_t v;
-		int n, fd = open("/proc/device-tree/panel/speaker-output", O_RDONLY);
-		if (fd < 0) return -1;
+		int n, fd;
+		snprintf(path, sizeof path, "%s", board->dt_node);
+		fd = open(path, O_RDONLY);
+		if (fd < 0) {
+			/* DT node missing/renamed on this firmware: mapping not
+			 * validated for it - fail closed. */
+			dbg_log("DBG A: speaker gate: DT node %s absent - fail closed\n",
+			        board->dt_node);
+			return -1;
+		}
 		n = read(fd, buf, sizeof(buf) - 1);
 		close(fd);
 		if (n < 4) { sf3000_mute_pin = -2; return -1; }
 		memcpy(&v, buf, 4);
 		v = ntohl(v);   /* DT cells are big-endian */
-		if (v >= 128 || (v >> 5) != 0) { sf3000_mute_pin = -2; return -1; }
-		sf3000_mute_pin = (int)(v & 0x1f);
+		/* The DT pin must land inside THIS board's validated range. */
+		if (v < (uint32_t)board->pin_min || v > (uint32_t)board->pin_max) {
+			sf3000_mute_pin = -2;
+			dbg_log("DBG A: speaker gate: DT pin %u outside validated range "
+			        "%d..%d - fail closed\n",
+			        (unsigned)v, board->pin_min, board->pin_max);
+			return -1;
+		}
+		sf3000_mute_pin = (int)v;
 	}
 	{
 		int fd = open("/dev/mem", O_RDWR | O_SYNC);
@@ -1230,24 +1305,34 @@ static int sf3000_spk_mute_map(void)
 }
 
 /* Drive the speaker mute line: mute=1 -> pad HIGH (speaker silent),
- * mute=0 -> pad LOW (speaker live). */
+ * mute=0 -> pad LOW (speaker live).  All state and GPIO transitions are
+ * serialized: the audio thread's gate, the pause-menu re-assert and the
+ * exec/teardown paths can race on this - one mutex keeps the amp from
+ * being left stuck muted or live by interleaved opens/closes. */
 static void sf3000_spk_mute(int mute)
 {
 	uint32_t bit;
-	if (sf3000_spk_mute_map() != 0) return;
+	pthread_mutex_lock(&sf3000_spk_mtx);
+	if (sf3000_spk_mute_map() != 0) {
+		pthread_mutex_unlock(&sf3000_spk_mtx);
+		return;
+	}
 	bit = 1u << sf3000_mute_pin;
 	/* direction (+0x14): OUTPUT before driving the value */
 	if (!(sf3000_gpioL_regs[5] & bit))
 		sf3000_gpioL_regs[5] |= bit;
 	if (mute) {
-		if (sf3000_spk_mute_state == 1) return;
-		sf3000_gpioL_regs[4] |= bit;    /* +0x10: HIGH = muted */
-		sf3000_spk_mute_state = 1;
+		if (sf3000_spk_mute_state != 1) {
+			sf3000_gpioL_regs[4] |= bit;    /* +0x10: HIGH = muted */
+			sf3000_spk_mute_state = 1;
+		}
 	} else {
-		if (sf3000_spk_mute_state == 0) return;
-		sf3000_gpioL_regs[4] &= ~bit;  /* LOW = live */
-		sf3000_spk_mute_state = 0;
+		if (sf3000_spk_mute_state != 0) {
+			sf3000_gpioL_regs[4] &= ~bit;  /* LOW = live */
+			sf3000_spk_mute_state = 0;
+		}
 	}
+	pthread_mutex_unlock(&sf3000_spk_mtx);
 }
 
 /* How long the speaker stays live after the last REAL audio chunk was
@@ -1416,12 +1501,13 @@ static void *sf3000_audio_thread_fn(void *unused)
 	int primed = 0;
 	int driver_active = 0;
 	int recovering = 0;
-	int launcher = 0;
 	int arm_chunks = 0;   /* launcher: silence runway before the first tick */
-	{
-		extern int g_is_frogui;
-		launcher = g_is_frogui;
-	}
+	/* LAUNCHER MODE: g_is_frogui IS the single authoritative value (set once
+	 * in main() before plat_init, never mutated after).  Reading it here
+	 * directly - no copied launcher flag that could drift from the real
+	 * process state (review: one authoritative mode/state value). */
+	extern int g_is_frogui;
+#define launcher (g_is_frogui)
 	unsigned gain_reload_polls = 0;	struct audio_frame last = { 0, 0 };
 
 	/* Silence-base speaker gate: mute the amp line before any driver
@@ -1715,6 +1801,7 @@ play_silence:
 	if (driver_active && sf3000_sound_driver_deinit)
 		sf3000_sound_driver_deinit();
 	return NULL;
+#undef launcher
 }
 #endif
 
@@ -1773,19 +1860,56 @@ void sf3000_sound_close_for_exec(void)
  * the only thread-safe way to release AUDDEC/I2SO (the SF3500-class driver
  * keeps its handle thread-local).  Keeps driver.so dlopen'ed so the next
  * picoarch process finds the same library state as before.  The amp line
- * is NOT touched here; main.c opens it as the very last step before exec. */
+ * is NOT touched here; main.c opens it as the very last step before exec.
+ *
+ * Bounded retry around the ACTUAL driver release (no fixed sleep): the
+ * firmware's audio daemon releases AUDDEC/I2SO asynchronously (~100 ms
+ * observed) after a deinit, and exposes no pollable status - the ONLY
+ * ready condition available is a real sound_driver_init() probe, which
+ * fails while the daemon still holds the async release and succeeds once
+ * it has completed (the same fact picoarch's own startup retry relies
+ * on).  Two probe phases, each exiting the moment the daemon confirms:
+ *   1. confirm the release of the consumer thread's deinit;
+ *   2. the probe handle itself is released (thread-local driver), whose
+ *      own async release is confirmed in turn.
+ * The exec'd app therefore inherits a FULLY settled audio state - the
+ * same guarantee the old fixed 150 ms sleep gave, but each phase takes
+ * exactly as long as the daemon actually needs.  Apps without their own
+ * init retry (rockbox, libffplayer) lose the race otherwise; pcsx4all
+ * survived only because it retries.  Each phase is bounded (30 x 10 ms,
+ * ~3x the observed settle); on a timeout we proceed as the old code
+ * would have, never blocking the handoff forever. */
+static int sf3000_probe_driver_release(void)
+{
+	for (int tries = 0; tries < 30; tries++) {
+		if (sf3000_sound_driver_init(NULL, SAMPLE_RATE, 2) >= 0)
+			return tries;   /* daemon confirmed the release */
+		usleep(10 * 1000);
+	}
+	return -1;   /* bounded: give up, behave like the old fixed wait */
+}
+
 void sf3000_sound_release_for_exec(void)
 {
 	if (sf3000_audio_running) {
 		sf3000_audio_running = 0;
 		pthread_join(sf3000_audio_thread, NULL);  /* thread deinits the DAC */
 	}
-	/* The audio daemon releases AUDDEC/I2SO asynchronously after our deinit
-	 * (~100 ms on these firmwares). Apps WITHOUT init retries (rockbox,
-	 * libffplayer) can lose the race and stay silent forever - pcsx4all
-	 * survived only because it retries its own init. Give the daemon the
-	 * same settle window picoarch itself uses at startup. */
-	usleep(150 * 1000);
+	if (!sf3000_sound_driver_init || !sf3000_sound_driver_deinit)
+		return;   /* driver never loaded: nothing of ours is held */
+	int t1 = sf3000_probe_driver_release();
+	if (t1 >= 0) {
+		/* Release confirmed.  Free the probe handle (on this thread - the
+		 * driver handle is thread-local) and confirm that second release
+		 * too, so the next app starts from a fully settled daemon. */
+		sf3000_sound_driver_deinit();
+		int t2 = sf3000_probe_driver_release();
+		dbg_log("DBG A: exec handoff: releases confirmed (%d+%d probes)\n",
+		        t1, t2 >= 0 ? t2 : 30);
+	} else {
+		dbg_log("DBG A: exec handoff: release probe hit the bound; "
+		        "continuing unconfirmed (old fixed-wait behaviour)\n");
+	}
 }
 #endif
 
@@ -2101,21 +2225,12 @@ int plat_init(void)
        (menu_sounds=on).  With ticks on, the launcher needs the audio path -
        the speaker gate keeps every other window silent, so the DAC is only
        powered when the user asked for audible UI feedback.
-       Games run in a fresh PicoArch exec and initialise audio normally. */
+       Games run in a fresh PicoArch exec and initialise audio normally.
+       The settings file is read through the ONE shared parser
+       (frogui_settings.h) - no duplicated FrogUI parsing here. */
     extern int g_is_frogui;
     if (g_is_frogui) {
-        int launcher_audio = 0;
-        FILE *f = fopen("/mnt/sdcard/frogui/settings.txt", "r");
-        if (f) {
-            char line[64];
-            while (fgets(line, sizeof(line), f)) {
-                if (strncmp(line, "menu_sounds=on", 14) == 0) {
-                    launcher_audio = 1;
-                    break;
-                }
-            }
-            fclose(f);
-        }
+        int launcher_audio = frogui_setting_is("menu_sounds", "on");
         if (launcher_audio) {
             if (plat_sound_init() == 0) {
                 /* path exists but starts silent: nothing plays until a tick */
@@ -2554,7 +2669,8 @@ void sf3000_frame_limit(void) {
  * "present = fb-write" (R36SX only) is the single behavioural split downstream;
  * SF3500 follows SF3000 in every code path, differing only by driver file. */
 extern void dbg_log(const char *fmt, ...);
-enum { TF_DEV_SF3000 = 0, TF_DEV_R36SX = 1, TF_DEV_SF3500 = 2, TF_DEV_GB350 = 3 };
+/* Device-id enum lives with the speaker-gate board table (first consumer)
+ * and the runtime detection below - one definition, all users. */
 static int g_dev_id = -1;       /* -1 = undetected */
 static int g_dev_r36sx = -1;    /* derived: 1 if R36SX (the fb-write device) */
 static int g_dev_w = 854, g_dev_h = 480, g_dev_scale = 150;
@@ -2656,6 +2772,9 @@ void sf3000_detect_device(void) {
 
 int sf3000_panel_w(void)  { sf3000_detect_device(); return g_dev_w; }
 int sf3000_panel_h(void)  { sf3000_detect_device(); return g_dev_h; }
+/* Raw TF_DEV_* id for the running console (used by the speaker-gate board
+ * table to fail closed on unvalidated devices). */
+int sf3000_device_id(void) { sf3000_detect_device(); return g_dev_id; }
 int sf3000_is_r36sx(void) { sf3000_detect_device(); return g_dev_r36sx > 0; }
 int sf3000_is_sf3500(void) { sf3000_detect_device(); return g_dev_id == TF_DEV_SF3500; }
 int sf3000_is_gb350(void) { sf3000_detect_device(); return g_dev_id == TF_DEV_GB350; }

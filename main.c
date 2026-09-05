@@ -29,6 +29,7 @@ static const char *picoarch_for_core(const char *core) {
 #include "core.h"
 #include "config.h"
 #include "content.h"
+#include "frogui_settings.h"
 #include "libpicofe/config_file.h"
 #include "libpicofe/input.h"
 #include "main.h"
@@ -54,8 +55,10 @@ int g_debug_frame = 0;
 #ifdef PLATFORM_SF3000
 /* FrogUI owns the nearest/bilinear filter choice (single setting, applies to
  * every game).  Picoarch reads /mnt/sdcard/frogui/settings.txt at startup and
- * overrides scale_filter accordingly.  No in-game menu option to change. */
-#define FROGUI_SETTINGS_FILE "/mnt/sdcard/frogui/settings.txt"
+ * overrides scale_filter accordingly.  No in-game menu option to change.
+ * The file is parsed through the ONE shared helper (frogui_settings.h) -
+ * main.c, plat_sdl.c and menu.c all read FrogUI settings through it, so the
+ * parsing cannot drift between consumers. */
 #define LAST_GAME_FILE       "/mnt/sdcard/picoarch/last_game.txt"
 /* Two independent settings (were one "auto_resume" toggle):
  *  - g_quick_resume: boot behavior — skip FrogUI and jump straight into the
@@ -85,37 +88,20 @@ static void apply_brightness(int level) {
 	DBG("DBG apply_brightness: level=%d -> %d\n", level, out);
 }
 static void load_frogui_settings(void) {
-	FILE *f = fopen(FROGUI_SETTINGS_FILE, "r");
-	if (!f) { DBG("DBG load_frogui_settings: no settings file\n"); return; }
-	char line[256];
-	while (fgets(line, sizeof(line), f)) {
-		char *eq = strchr(line, '=');
-		if (!eq) continue;
-		*eq = '\0';
-		char *val = eq + 1;
-		char *nl = strchr(val, '\n'); if (nl) *nl = '\0';
-		char *cr = strchr(val, '\r'); if (cr) *cr = '\0';
-		if (strcmp(line, "filter") == 0) {
-			/* FrogUI's filter is only the DEFAULT: if this game has its own
-			 * config (config_override), its in-menu Filter choice wins, so
-			 * don't clobber it here. sharp has no FrogUI keyword — per-game only. */
-			if (!config_override) {
-				if (strcmp(val, "bilinear") == 0)      scale_filter = SCALE_FILTER_BILINEAR;
-				else if (strcmp(val, "nearest") == 0)  scale_filter = SCALE_FILTER_NEAREST;
-			}
-			DBG("DBG load_frogui_settings: filter=%s override=%d → scale_filter=%d\n",
-			        val, config_override, scale_filter);
-		} else if (strcmp(line, "auto_resume") == 0) {
-			g_quick_resume = (strcmp(val, "on") == 0) ? 1 : 0;
-			DBG("DBG load_frogui_settings: quick_resume=%d\n", g_quick_resume);
-		} else if (strcmp(line, "autosave_autoload") == 0) {
-			g_autosave_autoload = (strcmp(val, "on") == 0) ? 1 : 0;
-			DBG("DBG load_frogui_settings: autosave_autoload=%d\n", g_autosave_autoload);
-		} else if (strcmp(line, "brightness") == 0) {
-			g_brightness = atoi(val);   /* applied on game path only, see below */
-		}
+	/* filter: FrogUI's choice is only the DEFAULT: if this game has its own
+	 * config (config_override), its in-menu Filter choice wins, so don't
+	 * clobber it here. sharp has no FrogUI keyword — per-game only. */
+	if (!config_override) {
+		if (frogui_setting_is("filter", "bilinear"))     scale_filter = SCALE_FILTER_BILINEAR;
+		else if (frogui_setting_is("filter", "nearest")) scale_filter = SCALE_FILTER_NEAREST;
 	}
-	fclose(f);
+	DBG("DBG load_frogui_settings: filter override=%d → scale_filter=%d\n",
+	        config_override, scale_filter);
+	g_quick_resume     = frogui_setting_is("auto_resume", "on");
+	g_autosave_autoload = frogui_setting_is("autosave_autoload", "on");
+	g_brightness       = frogui_setting_int("brightness", -1);   /* applied on game path only */
+	DBG("DBG load_frogui_settings: quick_resume=%d autosave_autoload=%d\n",
+	        g_quick_resume, g_autosave_autoload);
 }
 static int read_last_game(char *core, size_t cs, char *rom, size_t rs) {
 	FILE *f = fopen(LAST_GAME_FILE, "r");

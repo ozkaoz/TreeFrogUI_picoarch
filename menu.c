@@ -669,6 +669,9 @@ static const char h_optimize_text[]        =
 
 static const char *men_aspect_ratio[] = {
 	"Integer", "Native", "4:3", "16:9", "3:2", "5:4", "8:7", "16:10", "Fill", NULL };
+/* SF3000/SF3500 expose only the hardware-supported modes (used by
+ * menu_loop_video_prep when the running device is not R36SX). */
+static const char *men_aspect_ratio_sf[] = { "Integer", "Native", "Fill", NULL };
 
 static const char h_aspect_ratio[] =
 	"Integer: exact pixel multiples (sharpest).\n"
