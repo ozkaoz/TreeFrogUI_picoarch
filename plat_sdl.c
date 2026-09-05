@@ -1138,20 +1138,23 @@ static int sf3000_pmem_volume_read(void)
  * persistentmem is EEPROM-like: compare first and skip the durable write
  * when the level is unchanged - this path is hit by in-menu volume steps
  * and the live poll, where rewriting the same value adds wear and latency
- * for no effect. */
+ * for no effect.
+ * The SET is byte-exact with cubevol's avparam_save_volume (RE'd from the
+ * stock daemon): the volume node {flag=3,id=0} is written with len=1 - a
+ * single byte.  A 260-byte blob SET never reaches the node cubevol reads
+ * (the physical volume meter then ignores our writes). */
 static void sf3000_pmem_volume_write(int level)
 {
-	unsigned char buf[260];
+	unsigned char byte;
 	int fd;
 	if (level < 0) level = 0;
 	if (level > 100) level = 100;
 	if (sf3000_pmem_volume_read() == level)
 		goto mirror;   /* already stored: hardware mirror only, no EEPROM write */
-	memset(buf, 0, sizeof buf);
-	buf[0] = (unsigned char)level;
+	byte = (unsigned char)level;
 	fd = open("/dev/persistentmem", O_RDWR);
 	if (fd >= 0) {
-		struct sf3000_pmem_req req = { 3, 0, 260, 0, buf };
+		struct sf3000_pmem_req req = { 3, 0, 1, 0, &byte };
 		(void)ioctl(fd, SF3000_PMEM_SET, &req);
 		close(fd);
 	}
@@ -1657,14 +1660,25 @@ static void *sf3000_audio_thread_fn(void *unused)
 				}
 				recovering = 0;
 			}
-			/* Never starve the proprietary driver once playback has started.
-			 * Stopping writes until a full re-prime made a brief scheduling miss
-			 * turn into a 30ms hole, and restarting on an arbitrary waveform edge
-			 * produced the reported crackle.  Preserve cadence and ramp the missing
-			 * tail to zero instead.  Usually this conceals only a handful of frames. */
-			if (take < SF3000_ACHUNK) {
+		/* Never starve the proprietary driver once playback has started.
+		 * Stopping writes until a full re-prime made a brief scheduling miss
+		 * turn into a 30ms hole, and restarting on an arbitrary waveform edge
+		 * produced the reported crackle.  Preserve cadence and ramp the missing
+		 * tail to zero instead.  Usually this conceals only a handful of frames.
+		 * LAUNCHER: a tick is DISCRETE - what follows its last sample is
+		 * digital silence by design, so pad any shortage with pure zeros.
+		 * Holding the last edge here (fine for games) played a short burst
+		 * of the tick's tail amplitude at the end of each blip - the brief
+		 * static heard on-device after every menu tick. */
+		if (take < SF3000_ACHUNK) {
+			unsigned missing = SF3000_ACHUNK - take;
+			if (launcher) {
+				for (unsigned i = 0; i < missing; i++) {
+					chunk[take + i].left = 0;
+					chunk[take + i].right = 0;
+				}
+			} else {
 				struct audio_frame from = take ? chunk[take - 1] : last;
-				unsigned missing = SF3000_ACHUNK - take;
 				/* Tiny SNES shortages (often just 2--60 frames) must not be
 				 * amplified into a full fade-to-zero.  Hold the edge for up to
 				 * 3.3ms; reserve silence fading for a substantial stall. */
@@ -1678,13 +1692,14 @@ static void *sf3000_audio_thread_fn(void *unused)
 						chunk[take + i].right = (int16_t)((int32_t)from.right * remain / missing);
 					}
 				}
-				if (++sf3000_underruns <= 8 ||
-				    !(sf3000_underruns & (sf3000_underruns - 1)))
-					dbg_log("DBG A: underrun #%u: had %u/%u frames (overruns=%u)\n",
-					        sf3000_underruns, take, SF3000_ACHUNK,
-					        sf3000_overruns);
-				recovering = 1;
 			}
+			if (++sf3000_underruns <= 8 ||
+			    !(sf3000_underruns & (sf3000_underruns - 1)))
+				dbg_log("DBG A: underrun #%u: had %u/%u frames (overruns=%u)\n",
+				        sf3000_underruns, take, SF3000_ACHUNK,
+				        sf3000_overruns);
+			recovering = 1;
+		}
 			last = chunk[SF3000_ACHUNK - 1];
 			have_chunk = 1;
 		}
