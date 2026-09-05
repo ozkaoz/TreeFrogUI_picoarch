@@ -1350,11 +1350,16 @@ static void sf3000_spk_mute(int mute)
  * closing the line the instant a discrete tick's content is spent swallowed
  * the whole blip (silent menu ticks even though the samples reached the
  * DAC).  While the window is live the consumer keeps FEEDING DIGITAL
- * SILENCE - the same state as a running game, which never hisses - so slow
- * navigation also sounds on the first press.  500 ms covers comfortable
- * menu navigation; once it expires with no new content the gate closes the
- * line and the launcher returns to the validated silent-idle state. */
-#define SF3000_TICK_HOLD_MS 500
+ * SILENCE.  30 ms = the minimum drain (3 x 10 ms chunks) that lets the DAC
+ * consume what is in flight without truncating the click - then the gate
+ * closes the line and the launcher returns to the validated silent-idle
+ * state.  Field tuning (R36SX): the earlier 500 ms keep-warm window kept
+ * the DAC/amp powered after every tick and its residual SNR floor was
+ * audible as a short static tail; shortening to the drain window removes
+ * it.  Slow navigation stays audible on the FIRST press because a closed
+ * line re-arms via the 100 ms silence runway (SF3000_TICK_ARM_CHUNKS) -
+ * the arm-then-play path that was validated for cold ticks. */
+#define SF3000_TICK_HOLD_MS 30
 
 /* Amp arm-up: when the first real content arrives with the speaker line
  * still closed, open it and feed this many 10 ms chunks of digital silence
