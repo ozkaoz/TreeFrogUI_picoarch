@@ -611,11 +611,10 @@ static void pa_input_poll(void) {
 		uint32_t raw = sf3000_keys_filtered;  /* race-filtered (see plat_sdl.c) */
 		static uint32_t prev_raw = 0;   /* for rising-edge combo detection */
 
-		/* OnionOS-style hotkeys, SELECT acts as the MENU/function modifier:
-		 *   SELECT+START = menu, SELECT+R2 = save, SELECT+L2 = load,
-		 *   SELECT+R1 = fast-forward. (Rewind stays SELECT+B, handled in main.) */
+		/* Hardware hotkeys: FN or SELECT+START = menu; SELECT+R2 save; SELECT+L2 load; SELECT+R1 fast-forward. */
 		const uint32_t SEL_BIT   = (1u << 0);   /* SELECT = bit 0  */
 		const uint32_t START_BIT = (1u << 3);   /* START  = bit 3  */
+		const uint32_t FN_BIT    = (1u << 16);  /* FN     = bit 16 */
 		const uint32_t R1_BIT    = (1u << 11);  /* R1     = bit 11 */
 		const uint32_t L2_BIT    = (1u << 8);   /* L2     = bit 8  */
 		const uint32_t R2_BIT    = (1u << 9);   /* R2     = bit 9  */
@@ -637,16 +636,16 @@ static void pa_input_poll(void) {
 		extern int g_is_frogui;
 		static int menu_armed = 1;
 		static int ss_armed = 1;   /* save/load-state latch */
-		static int sel_off_cnt = 0;
+		static int menu_off_cnt = 0;
 		static int suppress_menu_buttons = 0;
 		if (g_is_frogui) {
 			prev_raw = raw;
 			buttons = sf3000_keys_to_buttons(raw);
 			goto frogui_no_hotkeys;
 		}
-		if (menu_armed && (raw & (SEL_BIT | START_BIT)) == (SEL_BIT | START_BIT)) {
+		if (menu_armed && (((raw & (SEL_BIT | START_BIT)) == (SEL_BIT | START_BIT)) || (raw & FN_BIT))) {
 			menu_armed = 0;
-			sel_off_cnt = 0;
+			menu_off_cnt = 0;
 			handle_emu_action(EACTION_MENU);
 			/* PCE maps START to Run and soft-resets on Run+Select. The input
 			 * snapshot above predates the blocking menu loop, so forwarding it on
@@ -675,8 +674,8 @@ static void pa_input_poll(void) {
 		 * stretch. A plain "SELECT==0" re-arm let the two-writer bit-flicker (a
 		 * 1-2 poll dropout) re-arm instantly, so the menu strobed open/closed and
 		 * only ever showed one black re-init frame. Require ~8 clean polls. */
-		if (!(raw & SEL_BIT)) { if (++sel_off_cnt >= 8) { menu_armed = 1; ss_armed = 1; } }
-		else sel_off_cnt = 0;
+		if (!(raw & (SEL_BIT | FN_BIT))) { if (++menu_off_cnt >= 8) { menu_armed = 1; ss_armed = 1; } }
+		else menu_off_cnt = 0;
 		prev_raw = raw;
 		/* Game buttons come from the REMAPPABLE bind table (in_update filled
 		 * actions[] above from the per-button SDL keys the input thread emits).
